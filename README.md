@@ -1,3 +1,13 @@
+# DO NOT DELETE #
+
+##BOSH##
+
+**The branch `bosh-gnatsd` contains custom changes to make the server suitable for BOSH's needs.**
+
+**Changes include supporting TLS & NON-TLS on the same port**
+
+**The main bosh repo https://github.com/cloudfoundry/bosh can pull the changes of the forked gnatsd by running the script `bin/update-gnatsd`.** 
+
 ##<img src="logos/nats-server.png" width="300">
 [![License][License-Image]][License-Url] [![ReportCard][ReportCard-Image]][ReportCard-Url] [![Build][Build-Status-Image]][Build-Status-Url] [![Release][Release-Image]][Release-Url] [![Coverage][Coverage-Image]][Coverage-Url]
 
