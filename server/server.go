@@ -54,8 +54,6 @@ type Server struct {
 	infoJSON      []byte
 	sl            *Sublist
 	opts          *Options
-	cAuth         Auth
-	rAuth         Auth
 	trace         bool
 	debug         bool
 	running       bool
@@ -63,10 +61,12 @@ type Server struct {
 	clients       map[uint64]*client
 	routes        map[uint64]*client
 	remotes       map[string]*client
+	users         map[string]*User
 	totalClients  uint64
 	done          chan bool
 	start         time.Time
 	http          net.Listener
+	httpHandler   http.Handler
 	httpReqStats  map[string]uint64
 	routeListener net.Listener
 	routeInfo     Info
@@ -137,35 +137,21 @@ func New(opts *Options) *Server {
 	// Used to kick out all of the route
 	// connect Go routines.
 	s.rcQuit = make(chan bool)
+
+	// Used to setup Authorization.
+	s.configureAuthorization()
+
 	s.generateServerInfoJSON()
 	s.handleSignals()
 
 	return s
 }
 
-// SetClientAuthMethod sets the authentication method for clients.
-func (s *Server) SetClientAuthMethod(authMethod Auth) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.info.AuthRequired = true
-	s.cAuth = authMethod
-
-	s.generateServerInfoJSON()
-}
-
-// SetRouteAuthMethod sets the authentication method for routes.
-func (s *Server) SetRouteAuthMethod(authMethod Auth) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.rAuth = authMethod
-}
-
 func (s *Server) generateServerInfoJSON() {
 	// Generate the info json
 	b, err := json.Marshal(s.info)
 	if err != nil {
-		Fatalf("Error marshalling INFO JSON: %+v\n", err)
+		Fatalf("Error marshaling INFO JSON: %+v\n", err)
 		return
 	}
 	s.infoJSON = []byte(fmt.Sprintf("INFO %s %s", b, CR_LF))
@@ -235,6 +221,12 @@ func (s *Server) Start() {
 	// Log the pid to a file
 	if s.opts.PidFile != _EMPTY_ {
 		s.logPid()
+	}
+
+	// Specifying both HTTP and HTTPS ports is a misconfiguration
+	if s.opts.HTTPPort != 0 && s.opts.HTTPSPort != 0 {
+		Fatalf("Can't specify both HTTP (%v) and HTTPs (%v) ports", s.opts.HTTPPort, s.opts.HTTPSPort)
+		return
 	}
 
 	// Start up the http server if needed.
@@ -520,12 +512,27 @@ func (s *Server) startMonitoring(secure bool) {
 		WriteTimeout:   2 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
+	s.mu.Lock()
+	s.httpHandler = mux
+	s.mu.Unlock()
 
 	go func() {
 		srv.Serve(s.http)
 		srv.Handler = nil
+		s.mu.Lock()
+		s.httpHandler = nil
+		s.mu.Unlock()
 		s.done <- true
 	}()
+}
+
+// HTTPHandler returns the http.Handler object used to handle monitoring
+// endpoints. It will return nil if the server is not configured for
+// monitoring, or if the server has not been started yet (Server.Start()).
+func (s *Server) HTTPHandler() http.Handler {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.httpHandler
 }
 
 func (s *Server) createClient(conn net.Conn) *client {
@@ -546,11 +553,6 @@ func (s *Server) createClient(conn net.Conn) *client {
 	c.initClient()
 
 	c.Debugf("Client connection created")
-
-	// Check for Auth
-	if authRequired {
-		c.setAuthTimer(secondsToDuration(s.opts.AuthTimeout))
-	}
 
 	// Send our information.
 	c.sendInfo(info)
@@ -611,6 +613,13 @@ func (s *Server) createClient(conn net.Conn) *client {
 	if c.nc == nil {
 		c.mu.Unlock()
 		return c
+	}
+
+	// Check for Auth. We schedule this timer after the TLS handshake to avoid
+	// the race where the timer fires during the handshake and causes the
+	// server to write bad data to the socket. See issue #432.
+	if authRequired {
+		c.setAuthTimer(secondsToDuration(s.opts.AuthTimeout))
 	}
 
 	if tlsRequired {
@@ -732,32 +741,6 @@ func tlsCipher(cs uint16) string {
 		return "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
 	}
 	return fmt.Sprintf("Unknown [%x]", cs)
-}
-
-func (s *Server) checkClientAuth(c *client) bool {
-	if s.cAuth == nil {
-		return true
-	}
-	return s.cAuth.Check(c)
-}
-
-func (s *Server) checkRouterAuth(c *client) bool {
-	if s.rAuth == nil {
-		return true
-	}
-	return s.rAuth.Check(c)
-}
-
-// Check auth and return boolean indicating if client is ok
-func (s *Server) checkAuth(c *client) bool {
-	switch c.typ {
-	case CLIENT:
-		return s.checkClientAuth(c)
-	case ROUTER:
-		return s.checkRouterAuth(c)
-	default:
-		return false
-	}
 }
 
 // Remove a client or route from our internal accounting.
