@@ -1,4 +1,15 @@
-// Copyright 2012-2016 Apcera Inc. All rights reserved.
+// Copyright 2012-2018 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package server
 
@@ -13,8 +24,8 @@ func TestSplitBufferSubOp(t *testing.T) {
 	defer cli.Close()
 	defer trash.Close()
 
-	s := &Server{sl: NewSublist()}
-	c := &client{srv: s, subs: make(map[string]*subscription), nc: cli}
+	s := &Server{gsl: NewSublist()}
+	c := &client{srv: s, sl: s.gsl, subs: make(map[string]*subscription), nc: cli}
 
 	subop := []byte("SUB foo 1\r\n")
 	subop1 := subop[:6]
@@ -32,7 +43,7 @@ func TestSplitBufferSubOp(t *testing.T) {
 	if c.state != OP_START {
 		t.Fatalf("Expected OP_START state vs %d\n", c.state)
 	}
-	r := s.sl.Match("foo")
+	r := s.gsl.Match("foo")
 	if r == nil || len(r.psubs) != 1 {
 		t.Fatalf("Did not match subscription properly: %+v\n", r)
 	}
@@ -49,7 +60,7 @@ func TestSplitBufferSubOp(t *testing.T) {
 }
 
 func TestSplitBufferUnsubOp(t *testing.T) {
-	s := &Server{sl: NewSublist()}
+	s := &Server{gsl: NewSublist()}
 	c := &client{srv: s, subs: make(map[string]*subscription)}
 
 	subop := []byte("SUB foo 1024\r\n")
@@ -76,7 +87,7 @@ func TestSplitBufferUnsubOp(t *testing.T) {
 	if c.state != OP_START {
 		t.Fatalf("Expected OP_START state vs %d\n", c.state)
 	}
-	r := s.sl.Match("foo")
+	r := s.gsl.Match("foo")
 	if r != nil && len(r.psubs) != 0 {
 		t.Fatalf("Should be no subscriptions in results: %+v\n", r)
 	}
@@ -241,7 +252,7 @@ func TestSplitBufferPubOp5(t *testing.T) {
 
 func TestSplitConnectArg(t *testing.T) {
 	c := &client{subs: make(map[string]*subscription)}
-	connectAll := []byte("CONNECT {\"verbose\":false,\"ssl_required\":false," +
+	connectAll := []byte("CONNECT {\"verbose\":false,\"tls_required\":false," +
 		"\"user\":\"test\",\"pedantic\":true,\"pass\":\"pass\"}\r\n")
 
 	argJSON := connectAll[8:]
@@ -288,7 +299,8 @@ func TestSplitConnectArg(t *testing.T) {
 }
 
 func TestSplitDanglingArgBuf(t *testing.T) {
-	c := &client{subs: make(map[string]*subscription)}
+	s := New(&defaultServerOptions)
+	c := &client{srv: s, sl: s.gsl, subs: make(map[string]*subscription)}
 
 	// We test to make sure we do not dangle any argBufs after processing
 	// since that could lead to performance issues.
@@ -330,7 +342,7 @@ func TestSplitDanglingArgBuf(t *testing.T) {
 	}
 
 	// CONNECT_ARG
-	connop := []byte("CONNECT {\"verbose\":false,\"ssl_required\":false," +
+	connop := []byte("CONNECT {\"verbose\":false,\"tls_required\":false," +
 		"\"user\":\"test\",\"pedantic\":true,\"pass\":\"pass\"}\r\n")
 	c.parse(connop[:22])
 	c.parse(connop[22:])

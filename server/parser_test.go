@@ -1,4 +1,15 @@
-// Copyright 2012-2015 Apcera Inc. All rights reserved.
+// Copyright 2012-2018 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package server
 
@@ -8,11 +19,11 @@ import (
 )
 
 func dummyClient() *client {
-	return &client{}
+	return &client{srv: New(&defaultServerOptions)}
 }
 
 func dummyRouteClient() *client {
-	return &client{typ: ROUTER}
+	return &client{srv: New(&defaultServerOptions), typ: ROUTER}
 }
 
 func TestParsePing(t *testing.T) {
@@ -93,15 +104,15 @@ func TestParsePong(t *testing.T) {
 	if err != nil || c.state != OP_START {
 		t.Fatalf("Unexpected: %d : %v\n", c.state, err)
 	}
-	if c.pout != 0 {
-		t.Fatalf("Unexpected pout value: %d vs 0\n", c.pout)
+	if c.ping.out != 0 {
+		t.Fatalf("Unexpected ping.out value: %d vs 0\n", c.ping.out)
 	}
 	err = c.parse(pong)
 	if err != nil || c.state != OP_START {
 		t.Fatalf("Unexpected: %d : %v\n", c.state, err)
 	}
-	if c.pout != 0 {
-		t.Fatalf("Unexpected pout value: %d vs 0\n", c.pout)
+	if c.ping.out != 0 {
+		t.Fatalf("Unexpected ping.out value: %d vs 0\n", c.ping.out)
 	}
 	// Should tolerate spaces
 	pong = []byte("PONG  \r")
@@ -115,26 +126,26 @@ func TestParsePong(t *testing.T) {
 	if err != nil || c.state != OP_START {
 		t.Fatalf("Unexpected: %d : %v\n", c.state, err)
 	}
-	if c.pout != 0 {
-		t.Fatalf("Unexpected pout value: %d vs 0\n", c.pout)
+	if c.ping.out != 0 {
+		t.Fatalf("Unexpected ping.out value: %d vs 0\n", c.ping.out)
 	}
 
 	// Should be adjusting c.pout (Pings Outstanding): reset to 0
 	c.state = OP_START
-	c.pout = 10
+	c.ping.out = 10
 	pong = []byte("PONG\r\n")
 	err = c.parse(pong)
 	if err != nil || c.state != OP_START {
 		t.Fatalf("Unexpected: %d : %v\n", c.state, err)
 	}
-	if c.pout != 0 {
-		t.Fatalf("Unexpected pout: %d vs 0\n", c.pout)
+	if c.ping.out != 0 {
+		t.Fatalf("Unexpected ping.out: %d vs 0\n", c.ping.out)
 	}
 }
 
 func TestParseConnect(t *testing.T) {
 	c := dummyClient()
-	connect := []byte("CONNECT {\"verbose\":false,\"pedantic\":true,\"ssl_required\":false}\r\n")
+	connect := []byte("CONNECT {\"verbose\":false,\"pedantic\":true,\"tls_required\":false}\r\n")
 	err := c.parse(connect)
 	if err != nil || c.state != OP_START {
 		t.Fatalf("Unexpected: %d : %v\n", c.state, err)
@@ -201,46 +212,106 @@ func TestParsePub(t *testing.T) {
 	}
 }
 
-func testPubArg(c *client, t *testing.T) {
-	if !bytes.Equal(c.pa.subject, []byte("foo")) {
-		t.Fatalf("Mismatched subject: '%s'\n", c.pa.subject)
-	}
-	if !bytes.Equal(c.pa.szb, []byte("22")) {
-		t.Fatalf("Bad size buf: '%s'\n", c.pa.szb)
-	}
-	if c.pa.size != 22 {
-		t.Fatalf("Bad size: %d\n", c.pa.size)
-	}
-}
-
 func TestParsePubArg(t *testing.T) {
 	c := dummyClient()
-	if err := c.processPub([]byte("foo 22")); err != nil {
-		t.Fatalf("Unexpected parse error: %v\n", err)
+
+	for _, test := range []struct {
+		arg     string
+		subject string
+		reply   string
+		size    int
+		szb     string
+	}{
+		{arg: "a 2",
+			subject: "a", reply: "", size: 2, szb: "2"},
+		{arg: "a 222",
+			subject: "a", reply: "", size: 222, szb: "222"},
+		{arg: "foo 22",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: " foo 22",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: "foo 22 ",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: "foo   22",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: " foo 22 ",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: " foo   22 ",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: "foo bar 22",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: " foo bar 22",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: "foo bar 22 ",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: "foo  bar  22",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: " foo bar 22 ",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: "  foo   bar  22  ",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: "  foo   bar  2222  ",
+			subject: "foo", reply: "bar", size: 2222, szb: "2222"},
+		{arg: "  foo     2222  ",
+			subject: "foo", reply: "", size: 2222, szb: "2222"},
+		{arg: "a\t2",
+			subject: "a", reply: "", size: 2, szb: "2"},
+		{arg: "a\t222",
+			subject: "a", reply: "", size: 222, szb: "222"},
+		{arg: "foo\t22",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: "\tfoo\t22",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: "foo\t22\t",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: "foo\t\t\t22",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: "\tfoo\t22\t",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: "\tfoo\t\t\t22\t",
+			subject: "foo", reply: "", size: 22, szb: "22"},
+		{arg: "foo\tbar\t22",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: "\tfoo\tbar\t22",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: "foo\tbar\t22\t",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: "foo\t\tbar\t\t22",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: "\tfoo\tbar\t22\t",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: "\t \tfoo\t \t \tbar\t \t22\t \t",
+			subject: "foo", reply: "bar", size: 22, szb: "22"},
+		{arg: "\t\tfoo\t\t\tbar\t\t2222\t\t",
+			subject: "foo", reply: "bar", size: 2222, szb: "2222"},
+		{arg: "\t \tfoo\t \t \t\t\t2222\t \t",
+			subject: "foo", reply: "", size: 2222, szb: "2222"},
+	} {
+		t.Run(test.arg, func(t *testing.T) {
+			if err := c.processPub([]byte(test.arg)); err != nil {
+				t.Fatalf("Unexpected parse error: %v\n", err)
+			}
+			if !bytes.Equal(c.pa.subject, []byte(test.subject)) {
+				t.Fatalf("Mismatched subject: '%s'\n", c.pa.subject)
+			}
+			if !bytes.Equal(c.pa.reply, []byte(test.reply)) {
+				t.Fatalf("Mismatched reply subject: '%s'\n", c.pa.reply)
+			}
+			if !bytes.Equal(c.pa.szb, []byte(test.szb)) {
+				t.Fatalf("Bad size buf: '%s'\n", c.pa.szb)
+			}
+			if c.pa.size != test.size {
+				t.Fatalf("Bad size: %d\n", c.pa.size)
+			}
+		})
 	}
-	testPubArg(c, t)
-	if err := c.processPub([]byte(" foo 22")); err != nil {
-		t.Fatalf("Unexpected parse error: %v\n", err)
-	}
-	testPubArg(c, t)
-	if err := c.processPub([]byte(" foo 22 ")); err != nil {
-		t.Fatalf("Unexpected parse error: %v\n", err)
-	}
-	testPubArg(c, t)
-	if err := c.processPub([]byte("foo   22")); err != nil {
-		t.Fatalf("Unexpected parse error: %v\n", err)
-	}
-	if err := c.processPub([]byte("foo   22\r")); err != nil {
-		t.Fatalf("Unexpected parse error: %v\n", err)
-	}
-	testPubArg(c, t)
 }
 
 func TestParsePubBadSize(t *testing.T) {
 	c := dummyClient()
 	// Setup localized max payload
 	c.mpay = 32768
-	if err := c.processPub([]byte("foo 2222222222222222\r")); err == nil {
+	if err := c.processPub([]byte("foo 2222222222222222")); err == nil {
 		t.Fatalf("Expected parse error for size too large")
 	}
 }

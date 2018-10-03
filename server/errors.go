@@ -1,4 +1,15 @@
-// Copyright 2012-2016 Apcera Inc. All rights reserved.
+// Copyright 2012-2018 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package server
 
@@ -30,7 +41,27 @@ var (
 	// server has been reached.
 	ErrTooManyConnections = errors.New("Maximum Connections Exceeded")
 
+	// ErrTooManySubs signals a client that the maximum number of subscriptions per connection
+	// has been reached.
+	ErrTooManySubs = errors.New("Maximum Subscriptions Exceeded")
+
 	// ErrClientConnectedToRoutePort represents an error condition when a client
 	// attempted to connect to the route listen port.
 	ErrClientConnectedToRoutePort = errors.New("Attempted To Connect To Route Port")
+
+	// ErrAccountExists is returned when an account is attempted to be registered
+	// but already exists.
+	ErrAccountExists = errors.New("Account Exists")
+
+	// ErrBadAccount represents a malformed or incorrect account.
+	ErrBadAccount = errors.New("Bad Account")
+
+	// ErrMissingAccount is returned when an account does not exist.
+	ErrMissingAccount = errors.New("Account Missing")
+
+	// ErrStreamImportAuthorization is returned when a stream import is not authorized.
+	ErrStreamImportAuthorization = errors.New("Stream Import Not Authorized")
+
+	// ErrServiceImportAuthorization is returned when a service import is not authorized.
+	ErrServiceImportAuthorization = errors.New("Service Import Not Authorized")
 )

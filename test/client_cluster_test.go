@@ -1,4 +1,15 @@
-// Copyright 2013-2014 Apcera Inc. All rights reserved.
+// Copyright 2013-2018 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package test
 
@@ -25,7 +36,7 @@ func TestServerRestartReSliceIssue(t *testing.T) {
 
 	servers := []string{urlA, urlB}
 
-	opts := nats.DefaultOptions
+	opts := nats.GetDefaultOptions()
 	opts.Timeout = (5 * time.Second)
 	opts.ReconnectWait = (50 * time.Millisecond)
 	opts.MaxReconnect = 1000
@@ -115,7 +126,7 @@ func TestServerRestartAndQueueSubs(t *testing.T) {
 	urlB := fmt.Sprintf("nats://%s:%d/", optsB.Host, optsB.Port)
 
 	// Client options
-	opts := nats.DefaultOptions
+	opts := nats.GetDefaultOptions()
 	opts.Timeout = (5 * time.Second)
 	opts.ReconnectWait = (50 * time.Millisecond)
 	opts.MaxReconnect = 1000
@@ -303,10 +314,12 @@ func TestRequestsAcrossRoutes(t *testing.T) {
 	// Make sure the route and the subscription are propagated.
 	nc1.Flush()
 
+	checkExpectedSubs(1, srvA, srvB)
+
 	var resp string
 
 	for i := 0; i < 100; i++ {
-		if err := ec2.Request("foo-req", i, &resp, 100*time.Millisecond); err != nil {
+		if err := ec2.Request("foo-req", i, &resp, 250*time.Millisecond); err != nil {
 			t.Fatalf("Received an error on Request test [%d]: %s", i, err)
 		}
 	}
@@ -350,16 +363,18 @@ func TestRequestsAcrossRoutesToQueues(t *testing.T) {
 		nc2.Publish(m.Reply, response)
 	})
 
+	checkExpectedSubs(2, srvA, srvB)
+
 	var resp string
 
 	for i := 0; i < 100; i++ {
-		if err := ec2.Request("foo-req", i, &resp, 100*time.Millisecond); err != nil {
+		if err := ec2.Request("foo-req", i, &resp, 500*time.Millisecond); err != nil {
 			t.Fatalf("Received an error on Request test [%d]: %s", i, err)
 		}
 	}
 
 	for i := 0; i < 100; i++ {
-		if err := ec1.Request("foo-req", i, &resp, 100*time.Millisecond); err != nil {
+		if err := ec1.Request("foo-req", i, &resp, 500*time.Millisecond); err != nil {
 			t.Fatalf("Received an error on Request test [%d]: %s", i, err)
 		}
 	}

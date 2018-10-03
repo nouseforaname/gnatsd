@@ -1,4 +1,15 @@
-// Copyright 2012-2014 Apcera Inc. All rights reserved.
+// Copyright 2012-2018 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 // +build !windows
 
@@ -19,6 +30,10 @@ type SysLogger struct {
 	debug  bool
 	trace  bool
 }
+
+// SetSyslogName sets the name to use for the syslog.
+// Currently used only on Windows.
+func SetSyslogName(name string) {}
 
 // GetSysLoggerTag generates the tag name for use in syslog statements. If
 // the executable is linked, the name of the link will be used as the tag,
@@ -84,6 +99,11 @@ func getNetworkAndAddr(fqn string) (network, addr string) {
 
 // Noticef logs a notice statement
 func (l *SysLogger) Noticef(format string, v ...interface{}) {
+	l.writer.Notice(fmt.Sprintf(format, v...))
+}
+
+// Warnf logs a notice statement
+func (l *SysLogger) Warnf(format string, v ...interface{}) {
 	l.writer.Notice(fmt.Sprintf(format, v...))
 }
 

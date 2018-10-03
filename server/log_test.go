@@ -1,13 +1,26 @@
-// Copyright 2014 Apcera Inc. All rights reserved.
+// Copyright 2012-2018 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package server
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nats-io/gnatsd/logger"
@@ -20,72 +33,93 @@ func TestSetLogger(t *testing.T) {
 	server.SetLogger(dl, true, true)
 
 	// We assert that the logger has change to the DummyLogger
-	_ = log.logger.(*DummyLogger)
+	_ = server.logging.logger.(*DummyLogger)
 
-	if debug != 1 {
-		t.Fatalf("Expected debug 1, received value %d\n", debug)
+	if server.logging.debug != 1 {
+		t.Fatalf("Expected debug 1, received value %d\n", server.logging.debug)
 	}
 
-	if trace != 1 {
-		t.Fatalf("Expected trace 1, received value %d\n", trace)
+	if server.logging.trace != 1 {
+		t.Fatalf("Expected trace 1, received value %d\n", server.logging.trace)
 	}
 
 	// Check traces
 	expectedStr := "This is a Notice"
-	Noticef(expectedStr)
+	server.Noticef(expectedStr)
 	dl.checkContent(t, expectedStr)
 	expectedStr = "This is an Error"
-	Errorf(expectedStr)
+	server.Errorf(expectedStr)
 	dl.checkContent(t, expectedStr)
 	expectedStr = "This is a Fatal"
-	Fatalf(expectedStr)
+	server.Fatalf(expectedStr)
 	dl.checkContent(t, expectedStr)
 	expectedStr = "This is a Debug"
-	Debugf(expectedStr)
+	server.Debugf(expectedStr)
 	dl.checkContent(t, expectedStr)
 	expectedStr = "This is a Trace"
-	Tracef(expectedStr)
+	server.Tracef(expectedStr)
+	dl.checkContent(t, expectedStr)
+	expectedStr = "This is a Warning"
+	server.Tracef(expectedStr)
 	dl.checkContent(t, expectedStr)
 
 	// Make sure that we can reset to fal
 	server.SetLogger(dl, false, false)
-	if debug != 0 {
-		t.Fatalf("Expected debug 0, got %v", debug)
+	if server.logging.debug != 0 {
+		t.Fatalf("Expected debug 0, got %v", server.logging.debug)
 	}
-	if trace != 0 {
-		t.Fatalf("Expected trace 0, got %v", trace)
+	if server.logging.trace != 0 {
+		t.Fatalf("Expected trace 0, got %v", server.logging.trace)
 	}
 	// Now, Debug and Trace should not produce anything
 	dl.msg = ""
-	Debugf("This Debug should not be traced")
+	server.Debugf("This Debug should not be traced")
 	dl.checkContent(t, "")
-	Tracef("This Trace should not be traced")
+	server.Tracef("This Trace should not be traced")
 	dl.checkContent(t, "")
 }
 
 type DummyLogger struct {
+	sync.Mutex
 	msg string
 }
 
-func (dl *DummyLogger) checkContent(t *testing.T, expectedStr string) {
-	if dl.msg != expectedStr {
-		stackFatalf(t, "Expected log to be: %v, got %v", expectedStr, dl.msg)
+func (l *DummyLogger) checkContent(t *testing.T, expectedStr string) {
+	l.Lock()
+	defer l.Unlock()
+	if l.msg != expectedStr {
+		stackFatalf(t, "Expected log to be: %v, got %v", expectedStr, l.msg)
 	}
 }
 
 func (l *DummyLogger) Noticef(format string, v ...interface{}) {
+	l.Lock()
+	defer l.Unlock()
 	l.msg = fmt.Sprintf(format, v...)
 }
 func (l *DummyLogger) Errorf(format string, v ...interface{}) {
+	l.Lock()
+	defer l.Unlock()
+	l.msg = fmt.Sprintf(format, v...)
+}
+func (l *DummyLogger) Warnf(format string, v ...interface{}) {
+	l.Lock()
+	defer l.Unlock()
 	l.msg = fmt.Sprintf(format, v...)
 }
 func (l *DummyLogger) Fatalf(format string, v ...interface{}) {
+	l.Lock()
+	defer l.Unlock()
 	l.msg = fmt.Sprintf(format, v...)
 }
 func (l *DummyLogger) Debugf(format string, v ...interface{}) {
+	l.Lock()
+	defer l.Unlock()
 	l.msg = fmt.Sprintf(format, v...)
 }
 func (l *DummyLogger) Tracef(format string, v ...interface{}) {
+	l.Lock()
+	defer l.Unlock()
 	l.msg = fmt.Sprintf(format, v...)
 }
 
@@ -115,7 +149,7 @@ func TestReOpenLogFile(t *testing.T) {
 	s.SetLogger(fileLog, false, false)
 	// Add some log
 	expectedStr := "This is a Notice"
-	Noticef(expectedStr)
+	s.Noticef(expectedStr)
 	// Check content of log
 	buf, err := ioutil.ReadFile(s.opts.LogFile)
 	if err != nil {
@@ -139,7 +173,7 @@ func TestReOpenLogFile(t *testing.T) {
 		t.Fatalf("File should indicate that file log was re-opened, got: %v", string(buf))
 	}
 	// Make sure we can append to the log
-	Noticef("New message")
+	s.Noticef("New message")
 	buf, err = ioutil.ReadFile(s.opts.LogFile)
 	if err != nil {
 		t.Fatalf("Error reading file: %v", err)
@@ -147,4 +181,57 @@ func TestReOpenLogFile(t *testing.T) {
 	if strings.HasSuffix(string(buf), "New message") {
 		t.Fatalf("New message was not appended after file was re-opened, got: %v", string(buf))
 	}
+}
+
+func TestNoPasswordsFromConnectTrace(t *testing.T) {
+	opts := DefaultOptions()
+	opts.NoLog = false
+	opts.Trace = true
+	opts.Username = "derek"
+	opts.Password = "s3cr3t"
+
+	s := &Server{opts: opts}
+	dl := &DummyLogger{}
+	s.SetLogger(dl, false, true)
+
+	_ = s.logging.logger.(*DummyLogger)
+	if s.logging.trace != 1 {
+		t.Fatalf("Expected trace 1, received value %d\n", s.logging.trace)
+	}
+	defer s.SetLogger(nil, false, false)
+
+	c, _, _ := newClientForServer(s)
+
+	connectOp := []byte("CONNECT {\"user\":\"derek\",\"pass\":\"s3cr3t\"}\r\n")
+	err := c.parse(connectOp)
+	if err != nil {
+		t.Fatalf("Received error: %v\n", err)
+	}
+
+	dl.Lock()
+	hasPass := strings.Contains(dl.msg, "s3cr3t")
+	dl.Unlock()
+
+	if hasPass {
+		t.Fatalf("Password detected in log output: %s", dl.msg)
+	}
+}
+
+func TestRemovePassFromTrace(t *testing.T) {
+	pass := []byte("s3cr3t")
+	check := func(r []byte) {
+		t.Helper()
+		if bytes.Contains(r, pass) {
+			t.Fatalf("Found password in %q", r)
+		}
+	}
+	check(removePassFromTrace([]byte("CONNECT {\"user\":\"derek\",\"pass\":\"s3cr3t\"}\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {\"user\":\"derek\",\"pass\":  \"s3cr3t\"}\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {\"user\":\"derek\",\"pass\":    \"s3cr3t\"     }\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {\"pass\":\"s3cr3t\",}\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {pass:s3cr3t ,   password =  s3cr3t}")))
+	check(removePassFromTrace([]byte("CONNECT {\"echo\":true,\"verbose\":false,\"pedantic\":false,\"user\":\"foo\",\"pass\":\"s3cr3t\",\"tls_required\":false,\"name\":\"APM7JU94z77YzP6WTBEiuw\"}\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {pass:s3cr3t\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {\"password\":\"s3cr3t\",}\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {\"echo\":true,\"verbose\":false,\"pedantic\":false,\"user\":\"foo\",\"password\":\"s3cr3t\",\"tls_required\":false,\"name\":\"APM7JU94z77YzP6WTBEiuw\"}\r\n")))
 }

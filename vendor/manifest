@@ -2,10 +2,18 @@
 	"version": 0,
 	"dependencies": [
 		{
+			"importpath": "github.com/nats-io/nkeys",
+			"repository": "https://github.com/nats-io/nkeys",
+			"vcs": "git",
+			"revision": "9206fa847ab4dfdf7378fb1965717f32978852e2",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/nats-io/nuid",
 			"repository": "https://github.com/nats-io/nuid",
 			"vcs": "git",
-			"revision": "289cccf02c178dc782430d534e3c1f5b72af807f",
+			"revision": "28b996b57a46dd0c2aa3a3dc7fa8780878331d00",
 			"branch": "master",
 			"notests": true
 		},
@@ -28,10 +36,19 @@
 			"notests": true
 		},
 		{
+			"importpath": "golang.org/x/crypto/ed25519",
+			"repository": "https://go.googlesource.com/crypto",
+			"vcs": "git",
+			"revision": "0e37d006457bf46f9e6692014ba72ef82c33022c",
+			"branch": "master",
+			"path": "/ed25519",
+			"notests": true
+		},
+		{
 			"importpath": "golang.org/x/sys/windows",
 			"repository": "https://go.googlesource.com/sys",
 			"vcs": "git",
-			"revision": "d75a52659825e75fff6158388dddc6a5b04f9ba5",
+			"revision": "f7928cfef4d09d1b080aa2b6fd3ca9ba1567c733",
 			"branch": "master",
 			"path": "windows",
 			"notests": true
