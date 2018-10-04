@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
+	"github.com/nats-io/gnatsd/server/auth"
 )
 
 // Authentication is an interface for implementing authentication
@@ -35,6 +36,11 @@ type ClientAuthentication interface {
 	GetTLSConnectionState() *tls.ConnectionState
 	// Optionally map a user after auth.
 	RegisterUser(*User)
+	// Associate certificates with client
+	RegisterCertificateClient(*CertificateClient, string)
+	GetCertificateClientNameAndID() (string, string, error)
+
+	IsLegacyBoshClient() bool
 }
 
 // User is for multiple accounts/users.
@@ -54,6 +60,12 @@ func (u *User) clone() *User {
 	*clone = *u
 	clone.Permissions = u.Permissions.clone()
 	return clone
+}
+
+// For multiple certificate clients.
+type CertificateClient struct {
+	ClientName  string       `json:"client_name"`
+	Permissions *Permissions `json:"permissions"`
 }
 
 // SubjectPermission is an individual allow and deny struct for publish
@@ -125,6 +137,8 @@ func (s *Server) configureAuthorization() {
 	// This just checks and sets up the user map if we have multiple users.
 	if opts.CustomClientAuthentication != nil {
 		s.info.AuthRequired = true
+	} else if opts.TLSEnableCertAuthorization {
+		s.info.AuthRequired = true
 	} else if opts.Users != nil {
 		s.users = make(map[string]*User)
 		for _, u := range opts.Users {
@@ -169,6 +183,12 @@ func (s *Server) isClientAuthorized(c *client) bool {
 	// Check custom auth first, then multiple users, then token, then single user/pass.
 	if opts.CustomClientAuthentication != nil {
 		return opts.CustomClientAuthentication.Check(c)
+	} else if opts.TLSEnableCertAuthorization {
+		fallbackAuth := func(client ClientAuthentication) bool {
+			return compareBasicAuth(opts, *client.GetOpts())
+		}
+		auth := server.NewCertificateAuth(opts.CertificateClients, fallbackAuth)
+		return auth.Check(c)
 	} else if s.hasUsers() {
 		s.mu.Lock()
 		user, ok := s.users[c.opts.Username]
@@ -189,10 +209,7 @@ func (s *Server) isClientAuthorized(c *client) bool {
 		return comparePasswords(opts.Authorization, c.opts.Authorization)
 
 	} else if opts.Username != "" {
-		if opts.Username != c.opts.Username {
-			return false
-		}
-		return comparePasswords(opts.Password, c.opts.Password)
+		return compareBasicAuth(opts, c.opts)
 	}
 
 	return true
@@ -268,4 +285,11 @@ func comparePasswords(serverPassword, clientPassword string) bool {
 		return false
 	}
 	return true
+}
+
+func compareBasicAuth(serverOpts *Options, clientOpts clientOpts) bool {
+	if serverOpts.Username != clientOpts.Username {
+		return false
+	}
+	return comparePasswords(serverOpts.Password, clientOpts.Password)
 }

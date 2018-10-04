@@ -16,11 +16,13 @@ package server
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -72,6 +74,12 @@ const (
 	handshakeComplete                        // For TLS clients, indicate that the handshake is complete
 	clearConnection                          // Marks that clearConnection has already been called.
 	flushOutbound                            // Marks client as having a flushOutbound call in progress.
+)
+
+const (
+	CertificateClientNameDelimiter = "."
+	CertificateClientIdWildcards   = ">*"
+	CertificateClientIDPlaceholder = "_CLIENT_ID"
 )
 
 // set the flag (would be equivalent to set the boolean to true)
@@ -159,6 +167,9 @@ type client struct {
 	debug bool
 	trace bool
 	echo  bool
+
+	isBOSHLegacyClient bool // The client connecting is an old agent (BOSH Backwards compatibility)
+	clientCertificate  *x509.Certificate
 
 	flags clientFlag // Compact booleans into a single field. Size will be increased when needed.
 }
@@ -301,6 +312,73 @@ func (c *client) initClient() {
 		c.ncs = fmt.Sprintf("%s - cid:%d", conn, c.cid)
 	case ROUTER:
 		c.ncs = fmt.Sprintf("%s - rid:%d", conn, c.cid)
+	}
+}
+
+func (c *client) IsLegacyBoshClient() bool {
+	return c.isBOSHLegacyClient
+}
+
+func (c *client) GetCertificateClientNameAndID() (clientName string, clientId string, err error) {
+	if c.clientCertificate == nil {
+		return "", "", fmt.Errorf("Client does not have a certificate")
+	}
+
+	commonName := c.clientCertificate.Subject.CommonName
+	if commonName == "" {
+		return "", "", nil
+	}
+
+	segments := strings.SplitN(commonName, CertificateClientNameDelimiter, 2)
+
+	if len(segments) == 1 {
+		err = fmt.Errorf("Clients must present both NAME and ID. `<client_id>.<client_name>`")
+	} else {
+		clientId = segments[0]
+		clientName = segments[1]
+
+		if strings.ContainsAny(clientId, CertificateClientIdWildcards) {
+			err = fmt.Errorf("Client ID cannot contain * or >")
+			return "", "", err
+		}
+	}
+
+	return
+}
+
+func (c *client) adjustPermission(permission string, clientID string) string {
+	if clientID == "" {
+		return permission
+	}
+
+	return strings.Replace(permission, CertificateClientIDPlaceholder, clientID, -1)
+}
+
+func (c *client) RegisterCertificateClient(certificateClient *CertificateClient, clientID string) {
+	// Process Permissions and map into client connection structures.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Pre-allocate all to simplify checks later.
+	c.perms = &permissions{}
+	c.perms.sub = NewSublist()
+	c.perms.pub = NewSublist()
+	c.perms.pcache = make(map[string]bool)
+
+	if certificateClient.Permissions == nil {
+		return
+	}
+
+	// Loop over publish permissions
+	for _, pubSubject := range certificateClient.Permissions.Publish {
+		sub := &subscription{subject: []byte(c.adjustPermission(pubSubject, clientID))}
+		c.perms.pub.Insert(sub)
+	}
+
+	// Loop over subscribe permissions
+	for _, subSubject := range certificateClient.Permissions.Subscribe {
+		sub := &subscription{subject: []byte(c.adjustPermission(subSubject, clientID))}
+		c.perms.sub.Insert(sub)
 	}
 }
 

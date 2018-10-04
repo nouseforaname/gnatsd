@@ -35,6 +35,7 @@ import (
 	_ "net/http/pprof"
 
 	"github.com/nats-io/gnatsd/util"
+	"github.com/nats-io/go-nats"
 )
 
 // Info is the information sent to clients to help them understand information
@@ -502,6 +503,9 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 		}
 		tmpDelay = ACCEPT_MIN_SLEEP
 		s.startGoRoutine(func() {
+			if tcpConn, ok := conn.(*net.TCPConn); ok {
+				tcpConn.SetKeepAlive(true)
+			}
 			s.createClient(conn)
 			s.grWG.Done()
 		})
@@ -791,6 +795,33 @@ func (s *Server) createClient(conn net.Conn) *client {
 	// Re-Grab lock
 	c.mu.Lock()
 
+	if info.TLSRequired && s.opts.TLSAllowLegacyClients {
+		peekConn := NewPeekableConn(conn)
+
+		hdr, err := peekConn.PeekFirst(7)
+
+		if err != nil {
+			c.Errorf("An error occurred while peeking connection: %v", err)
+		}
+
+		tls_detected, err := TLSDetector{}.Detect(hdr)
+
+		if err != nil {
+			c.Errorf("An error occurred while detecting if client requested TLS: %v", err)
+		}
+
+		if tls_detected {
+			c.Debugf("Detected TLS connection while peeking, moving on")
+		} else {
+			c.Debugf("Detected NON TLS connection while peeking, setting 'tlsRequired' to false")
+			c.isBOSHLegacyClient = true
+			info.TLSRequired = false
+		}
+
+		conn = peekConn
+		c.nc = conn
+	}
+	
 	// Check for TLS
 	if info.TLSRequired {
 		c.Debugf("Starting TLS client connection handshake")
@@ -836,6 +867,21 @@ func (s *Server) createClient(conn net.Conn) *client {
 
 	// Set the Ping timer
 	c.setPingTimer()
+
+	if info.TLSRequired && s.opts.TLSEnableCertAuthorization {
+		cs := c.nc.(*tls.Conn).ConnectionState()
+
+		if len(cs.PeerCertificates) == 0 {
+			c.Debugf("Client certificate error: no client certificates in request")
+			c.sendErr("Client provided no certificates")
+			c.closeConnection()
+			return nil
+		}
+
+		//https://github.com/golang/go/blob/go1.8.3/src/crypto/tls/handshake_server.go#L723:L742
+		//Golang should have already verified the leaf certificate.
+		c.clientCertificate = cs.PeerCertificates[0]
+	}
 
 	// Spin up the read loop.
 	s.startGoRoutine(c.readLoop)
