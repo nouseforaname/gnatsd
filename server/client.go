@@ -361,24 +361,36 @@ func (c *client) RegisterCertificateClient(certificateClient *CertificateClient,
 
 	// Pre-allocate all to simplify checks later.
 	c.perms = &permissions{}
-	c.perms.sub = NewSublist()
-	c.perms.pub = NewSublist()
+	c.perms.sub.allow = NewSublist()
+	c.perms.pub.allow = NewSublist()
 	c.perms.pcache = make(map[string]bool)
 
 	if certificateClient.Permissions == nil {
 		return
 	}
 
-	// Loop over publish permissions
-	for _, pubSubject := range certificateClient.Permissions.Publish {
+	// Loop over allow publish permissions
+	for _, pubSubject := range certificateClient.Permissions.Publish.Allow {
 		sub := &subscription{subject: []byte(c.adjustPermission(pubSubject, clientID))}
-		c.perms.pub.Insert(sub)
+		c.perms.pub.allow.Insert(sub)
 	}
 
-	// Loop over subscribe permissions
-	for _, subSubject := range certificateClient.Permissions.Subscribe {
+	// Loop over allow subscribe permissions
+	for _, subSubject := range certificateClient.Permissions.Subscribe.Allow {
 		sub := &subscription{subject: []byte(c.adjustPermission(subSubject, clientID))}
-		c.perms.sub.Insert(sub)
+		c.perms.sub.allow.Insert(sub)
+	}
+
+	// Loop over deny publish permissions
+	for _, pubSubject := range certificateClient.Permissions.Publish.Deny {
+		sub := &subscription{subject: []byte(c.adjustPermission(pubSubject, clientID))}
+		c.perms.pub.deny.Insert(sub)
+	}
+
+	// Loop over deny subscribe permissions
+	for _, subSubject := range certificateClient.Permissions.Subscribe.Deny {
+		sub := &subscription{subject: []byte(c.adjustPermission(subSubject, clientID))}
+		c.perms.sub.deny.Insert(sub)
 	}
 }
 

@@ -1,19 +1,15 @@
 package server
 
-import (
-	"github.com/nats-io/gnatsd/server"
-)
-
-type CertificateLegacyAuth func(client server.ClientAuthentication) bool
+type CertificateLegacyAuth func(client ClientAuthentication) bool
 
 type CertificateAuth struct {
-	certificateClients map[string]*server.CertificateClient
+	certificateClients map[string]*CertificateClient
 	fallbackAuth CertificateLegacyAuth
 }
 
-func NewCertificateAuth(certificateClients []*server.CertificateClient, fallbackAuth CertificateLegacyAuth) *CertificateAuth {
+func NewCertificateAuth(certificateClients []*CertificateClient, fallbackAuth CertificateLegacyAuth) *CertificateAuth {
 	certificateAuth := &CertificateAuth{
-		certificateClients: make(map[string]*server.CertificateClient),
+		certificateClients: make(map[string]*CertificateClient),
 		fallbackAuth: fallbackAuth,
 	}
 	for _, client := range certificateClients {
@@ -22,7 +18,7 @@ func NewCertificateAuth(certificateClients []*server.CertificateClient, fallback
 	return certificateAuth
 }
 
-func (a *CertificateAuth) Check(c server.ClientAuthentication) bool {
+func (a *CertificateAuth) Check(c ClientAuthentication) bool {
 	if c.IsLegacyBoshClient() {
 		if c.GetOpts().Username == "" {
 			return false

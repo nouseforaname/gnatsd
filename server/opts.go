@@ -1202,7 +1202,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.StringVar(&opts.TLSCert, "tlscert", "", "Server certificate file.")
 	fs.StringVar(&opts.TLSKey, "tlskey", "", "Private key for server certificate.")
 	fs.StringVar(&opts.TLSCaCert, "tlscacert", "", "Client certificate CA for verification.")
-	fs.BoolVar(&opts.TLSEnableCertAuthorization, "")
+	fs.BoolVar(&opts.TLSEnableCertAuthorization, "tlsenablecertauthorization", false, "Enable Certificate Authorization")
 
 	// The flags definition above set "default" values to some of the options.
 	// Calling Parse() here will override the default options with any value

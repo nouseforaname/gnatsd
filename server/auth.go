@@ -19,7 +19,6 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
-	"github.com/nats-io/gnatsd/server/auth"
 )
 
 // Authentication is an interface for implementing authentication
@@ -187,7 +186,7 @@ func (s *Server) isClientAuthorized(c *client) bool {
 		fallbackAuth := func(client ClientAuthentication) bool {
 			return compareBasicAuth(opts, *client.GetOpts())
 		}
-		auth := server.NewCertificateAuth(opts.CertificateClients, fallbackAuth)
+		auth := NewCertificateAuth(opts.CertificateClients, fallbackAuth)
 		return auth.Check(c)
 	} else if s.hasUsers() {
 		s.mu.Lock()

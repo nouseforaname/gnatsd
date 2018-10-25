@@ -35,7 +35,6 @@ import (
 	_ "net/http/pprof"
 
 	"github.com/nats-io/gnatsd/util"
-	"github.com/nats-io/go-nats"
 )
 
 // Info is the information sent to clients to help them understand information
@@ -821,7 +820,7 @@ func (s *Server) createClient(conn net.Conn) *client {
 		conn = peekConn
 		c.nc = conn
 	}
-	
+
 	// Check for TLS
 	if info.TLSRequired {
 		c.Debugf("Starting TLS client connection handshake")
@@ -874,7 +873,7 @@ func (s *Server) createClient(conn net.Conn) *client {
 		if len(cs.PeerCertificates) == 0 {
 			c.Debugf("Client certificate error: no client certificates in request")
 			c.sendErr("Client provided no certificates")
-			c.closeConnection()
+			c.closeConnection(TLSHandshakeError)
 			return nil
 		}
 

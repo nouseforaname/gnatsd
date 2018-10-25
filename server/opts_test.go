@@ -1188,90 +1188,92 @@ func TestTLSConfigCertAuthorizationIncorrectFile(t *testing.T) {
 	}
 }
 
-//func TestAuthorizationConfigCertificateClients(t *testing.T) {
-//	opts, err := ProcessConfigFile("./configs/cert_authorization/authorization_certificate_clients.conf")
-//	if err != nil {
-//		t.Fatalf("Received an error reading config file: %v\n", err)
-//	}
-//	processOptions(opts)
-//	lu := len(opts.CertificateClients)
-//	if lu != 3 {
-//		t.Fatalf("Expected 3 clients, got %d\n", lu)
-//	}
-//	// Build a map
-//	mu := make(map[string]*CertificateClient)
-//	for _, c := range opts.CertificateClients {
-//		mu[c.ClientName] = c
-//	}
-//
-//	// Alice
-//	alice, ok := mu["alice"]
-//	if !ok {
-//		t.Fatalf("Expected to see user Alice\n")
-//	}
-//	// Check for permissions details
-//	if alice.Permissions == nil {
-//		t.Fatalf("Expected Alice's permissions to be non-nil\n")
-//	}
-//	if alice.Permissions.Publish == nil {
-//		t.Fatalf("Expected Alice's publish permissions to be non-nil\n")
-//	}
-//	if len(alice.Permissions.Publish) != 1 {
-//		t.Fatalf("Expected Alice's publish permissions to have 1 element, got %d\n",
-//			len(alice.Permissions.Publish))
-//	}
-//	pubPerm := alice.Permissions.Publish[0]
-//	if pubPerm != "*" {
-//		t.Fatalf("Expected Alice's publish permissions to be '*', got %q\n", pubPerm)
-//	}
-//	if alice.Permissions.Subscribe == nil {
-//		t.Fatalf("Expected Alice's subscribe permissions to be non-nil\n")
-//	}
-//	if len(alice.Permissions.Subscribe) != 1 {
-//		t.Fatalf("Expected Alice's subscribe permissions to have 1 element, got %d\n",
-//			len(alice.Permissions.Subscribe))
-//	}
-//	subPerm := alice.Permissions.Subscribe[0]
-//	if subPerm != ">" {
-//		t.Fatalf("Expected Alice's subscribe permissions to be '>', got %q\n", subPerm)
-//	}
-//
-//	// Bob
-//	bob, ok := mu["bob"]
-//	if !ok {
-//		t.Fatalf("Expected to see user Bob\n")
-//	}
-//	if bob.Permissions == nil {
-//		t.Fatalf("Expected Bob's permissions to be non-nil\n")
-//	}
-//
-//	// Susan
-//	susan, ok := mu["susan"]
-//	if !ok {
-//		t.Fatalf("Expected to see user Susan\n")
-//	}
-//	if susan.Permissions == nil {
-//		t.Fatalf("Expected Susan's permissions to be non-nil\n")
-//	}
-//	// Check susan closely since she inherited the default permissions.
-//	if susan.Permissions == nil {
-//		t.Fatalf("Expected Susan's permissions to be non-nil\n")
-//	}
-//	if susan.Permissions.Publish != nil {
-//		t.Fatalf("Expected Susan's publish permissions to be nil\n")
-//	}
-//	if susan.Permissions.Subscribe == nil {
-//		t.Fatalf("Expected Susan's subscribe permissions to be non-nil\n")
-//	}
-//	if len(susan.Permissions.Subscribe) != 1 {
-//		t.Fatalf("Expected Susan's subscribe permissions to have 1 element, got %d\n",
-//			len(susan.Permissions.Subscribe))
-//	}
-//	subPerm = susan.Permissions.Subscribe[0]
-//	if subPerm != "PUBLIC.>" {
-//		t.Fatalf("Expected Susan's subscribe permissions to be 'PUBLIC.>', got %q\n", subPerm)
-//	}
-//}
+
+//TODO Add deny lists
+func TestAuthorizationConfigCertificateClients(t *testing.T) {
+	opts, err := ProcessConfigFile("./configs/cert_authorization/authorization_certificate_clients.conf")
+	if err != nil {
+		t.Fatalf("Received an error reading config file: %v\n", err)
+	}
+	processOptions(opts)
+	lu := len(opts.CertificateClients)
+	if lu != 3 {
+		t.Fatalf("Expected 3 clients, got %d\n", lu)
+	}
+	// Build a map
+	mu := make(map[string]*CertificateClient)
+	for _, c := range opts.CertificateClients {
+		mu[c.ClientName] = c
+	}
+
+	// Alice
+	alice, ok := mu["alice"]
+	if !ok {
+		t.Fatalf("Expected to see user Alice\n")
+	}
+	// Check for permissions details
+	if alice.Permissions == nil {
+		t.Fatalf("Expected Alice's permissions to be non-nil\n")
+	}
+	if alice.Permissions.Publish == nil {
+		t.Fatalf("Expected Alice's publish permissions to be non-nil\n")
+	}
+	if len(alice.Permissions.Publish.Allow) != 1 {
+		t.Fatalf("Expected Alice's publish permissions to have 1 element, got %d\n",
+			len(alice.Permissions.Publish.Allow))
+	}
+	pubPerm := alice.Permissions.Publish.Allow[0]
+	if pubPerm != "*" {
+		t.Fatalf("Expected Alice's publish permissions to be '*', got %q\n", pubPerm)
+	}
+	if alice.Permissions.Subscribe == nil {
+		t.Fatalf("Expected Alice's subscribe permissions to be non-nil\n")
+	}
+	if len(alice.Permissions.Subscribe.Allow) != 1 {
+		t.Fatalf("Expected Alice's subscribe permissions to have 1 element, got %d\n",
+			len(alice.Permissions.Subscribe.Allow))
+	}
+	subPerm := alice.Permissions.Subscribe.Allow[0]
+	if subPerm != ">" {
+		t.Fatalf("Expected Alice's subscribe permissions to be '>', got %q\n", subPerm)
+	}
+
+	// Bob
+	bob, ok := mu["bob"]
+	if !ok {
+		t.Fatalf("Expected to see user Bob\n")
+	}
+	if bob.Permissions == nil {
+		t.Fatalf("Expected Bob's permissions to be non-nil\n")
+	}
+
+	// Susan
+	susan, ok := mu["susan"]
+	if !ok {
+		t.Fatalf("Expected to see user Susan\n")
+	}
+	if susan.Permissions == nil {
+		t.Fatalf("Expected Susan's permissions to be non-nil\n")
+	}
+	// Check susan closely since she inherited the default permissions.
+	if susan.Permissions == nil {
+		t.Fatalf("Expected Susan's permissions to be non-nil\n")
+	}
+	if susan.Permissions.Publish != nil {
+		t.Fatalf("Expected Susan's publish permissions to be nil\n")
+	}
+	if susan.Permissions.Subscribe == nil {
+		t.Fatalf("Expected Susan's subscribe permissions to be non-nil\n")
+	}
+	if len(susan.Permissions.Subscribe.Allow) != 1 {
+		t.Fatalf("Expected Susan's subscribe permissions to have 1 element, got %d\n",
+			len(susan.Permissions.Subscribe.Allow))
+	}
+	subPerm = susan.Permissions.Subscribe.Allow[0]
+	if subPerm != "PUBLIC.>" {
+		t.Fatalf("Expected Susan's subscribe permissions to be 'PUBLIC.>', got %q\n", subPerm)
+	}
+}
 
 func TestCertificateClientDefined_CertAuthorizationDisabled(t *testing.T) {
 	_, err := ProcessConfigFile("./configs/cert_authorization/certificate_clients_defined_cert_authorization_disabled.conf")
