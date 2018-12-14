@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/go-nats"
+	nats "github.com/nats-io/go-nats"
 )
 
 // Ensure Reload returns an error when attempting to reload a server that did
@@ -1006,7 +1006,7 @@ func TestConfigReloadChangePermissions(t *testing.T) {
 	// authorized.
 	select {
 	case err := <-asyncErr:
-		if !strings.Contains(err.Error(), "permissions violation for subscription to \"_inbox.>\"") {
+		if !strings.Contains(strings.ToLower(err.Error()), "permissions violation for subscription to \"_inbox.>\"") {
 			t.Fatalf("Expected permissions violation error, got %v", err)
 		}
 	case <-time.After(5 * time.Second):
@@ -1026,7 +1026,7 @@ func TestConfigReloadChangePermissions(t *testing.T) {
 
 	select {
 	case err := <-asyncErr:
-		if !strings.Contains(err.Error(), "permissions violation for publish to \"req.foo\"") {
+		if !strings.Contains(strings.ToLower(err.Error()), "permissions violation for publish to \"req.foo\"") {
 			t.Fatalf("Expected permissions violation error, got %v", err)
 		}
 	case <-time.After(5 * time.Second):
