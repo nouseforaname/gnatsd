@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/go-nats"
+	nats "github.com/nats-io/go-nats"
 )
 
 func TestTLSConnection(t *testing.T) {
@@ -282,8 +282,8 @@ func TestTLSBadAuthError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Expected error trying to connect to secure server")
 	}
-	if err.Error() != nats.ErrAuthorization.Error() {
-		t.Fatalf("Excpected and auth violation, got %v\n", err)
+	if !strings.Contains(err.Error(), "Authorization Violation") {
+		t.Fatalf("Expected an Authorization Violation, got %v\n", err)
 	}
 }
 

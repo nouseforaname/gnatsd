@@ -12,7 +12,7 @@ import (
 
 	"regexp"
 
-	"github.com/nats-io/go-nats"
+	nats "github.com/nats-io/go-nats"
 )
 
 func TestNonTLSConnectionsWithMutualTLSServer(t *testing.T) {
@@ -191,8 +191,8 @@ func TestTLSConnections_CertificateAuthorizationEnable_CertificateCommonNameStar
 	}
 
 	expectedErrorMessage := "nats: authorization violation"
-	if !strings.Contains(err.Error(), expectedErrorMessage) {
-		stackFatalf(t, "Expected '%s' to contain '%s'",  err.Error(), expectedErrorMessage)
+	if !strings.Contains(strings.ToLower(err.Error()), expectedErrorMessage) {
+		stackFatalf(t, "Expected '%s' to contain '%s'", err.Error(), expectedErrorMessage)
 	}
 }
 
@@ -238,8 +238,8 @@ func TestTLSConnections_CertificateAuthorizationEnable_ClientCertificateNoCommon
 	}
 
 	expectedErrorMessage := "nats: authorization violation"
-	if !strings.Contains(err.Error(), expectedErrorMessage) {
-		stackFatalf(t, "Expected '%s' to contain '%s'",  err.Error(), expectedErrorMessage)
+	if !strings.Contains(strings.ToLower(err.Error()), expectedErrorMessage) {
+		stackFatalf(t, "Expected '%s' to contain '%s'", err.Error(), expectedErrorMessage)
 	}
 }
 
@@ -285,8 +285,8 @@ func TestTLSConnections_CertificateAuthorizationEnable_ClientCertificateNonExist
 	}
 
 	expectedErrorMessage := "nats: authorization violation"
-	if !strings.Contains(err.Error(), expectedErrorMessage) {
-		stackFatalf(t, "Expected '%s' to contain '%s'",  err.Error(), expectedErrorMessage)
+	if !strings.Contains(strings.ToLower(err.Error()), expectedErrorMessage) {
+		stackFatalf(t, "Expected '%s' to contain '%s'", err.Error(), expectedErrorMessage)
 	}
 }
 
@@ -340,7 +340,7 @@ func TestTLSConnections_CertificateAuthorizationEnable_CertificateClientUnauthor
 	}
 
 	expectedSuffix := fmt.Sprintf(`permissions violation for subscription to "%s"`, subj)
-	if !strings.HasSuffix(err.Error(), expectedSuffix) {
+	if !strings.HasSuffix(strings.ToLower(err.Error()), expectedSuffix) {
 		stackFatalf(t, "Response did not match expected: \n\tReceived:'%q'\n\tExpected to contain:'%s'\n", err.Error(), expectedSuffix)
 	}
 }
@@ -395,7 +395,7 @@ func TestTLSConnections_CertificateAuthorizationEnable_CertificateClientUnauthor
 	}
 
 	expectedSuffix := fmt.Sprintf(`permissions violation for subscription to "%s"`, subj)
-	if !strings.HasSuffix(err.Error(), expectedSuffix) {
+	if !strings.HasSuffix(strings.ToLower(err.Error()), expectedSuffix) {
 		stackFatalf(t, "Response did not match expected: \n\tReceived:'%q'\n\tExpected to contain:'%s'\n", err.Error(), expectedSuffix)
 	}
 }
