@@ -400,6 +400,80 @@ func Benchmark___PubEightQueueSub(b *testing.B) {
 	s.Shutdown()
 }
 
+func Benchmark__DenyMsgNoWCPubSub(b *testing.B) {
+	s, opts := RunServerWithConfig("./configs/authorization.conf")
+	defer s.Shutdown()
+
+	c := createClientConn(b, opts.Host, opts.Port)
+	defer c.Close()
+
+	expectAuthRequired(b, c)
+	cs := fmt.Sprintf("CONNECT {\"verbose\":false,\"pedantic\":false,\"user\":\"%s\",\"pass\":\"%s\"}\r\n", "bench-deny", DefaultPass)
+	sendProto(b, c, cs)
+
+	sendProto(b, c, "SUB foo 1\r\n")
+	bw := bufio.NewWriterSize(c, defaultSendBufSize)
+	sendOp := []byte(fmt.Sprintf("PUB foo 2\r\nok\r\n"))
+	ch := make(chan bool)
+	expected := len("MSG foo 1 2\r\nok\r\n") * b.N
+	go drainConnection(b, c, ch, expected)
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, err := bw.Write(sendOp)
+		if err != nil {
+			b.Errorf("Received error on PUB write: %v\n", err)
+		}
+	}
+	err := bw.Flush()
+	if err != nil {
+		b.Errorf("Received error on FLUSH write: %v\n", err)
+	}
+
+	// Wait for connection to be drained
+	<-ch
+
+	// To not count defer cleanup of client and server.
+	b.StopTimer()
+}
+
+func Benchmark_DenyMsgYesWCPubSub(b *testing.B) {
+	s, opts := RunServerWithConfig("./configs/authorization.conf")
+	defer s.Shutdown()
+
+	c := createClientConn(b, opts.Host, opts.Port)
+	defer c.Close()
+
+	expectAuthRequired(b, c)
+	cs := fmt.Sprintf("CONNECT {\"verbose\":false,\"pedantic\":false,\"user\":\"%s\",\"pass\":\"%s\"}\r\n", "bench-deny", DefaultPass)
+	sendProto(b, c, cs)
+
+	sendProto(b, c, "SUB * 1\r\n")
+	bw := bufio.NewWriterSize(c, defaultSendBufSize)
+	sendOp := []byte(fmt.Sprintf("PUB foo 2\r\nok\r\n"))
+	ch := make(chan bool)
+	expected := len("MSG foo 1 2\r\nok\r\n") * b.N
+	go drainConnection(b, c, ch, expected)
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, err := bw.Write(sendOp)
+		if err != nil {
+			b.Errorf("Received error on PUB write: %v\n", err)
+		}
+	}
+	err := bw.Flush()
+	if err != nil {
+		b.Errorf("Received error on FLUSH write: %v\n", err)
+	}
+
+	// Wait for connection to be drained
+	<-ch
+
+	// To not count defer cleanup of client and server.
+	b.StopTimer()
+}
+
 func routePubSub(b *testing.B, size int) {
 	b.StopTimer()
 
@@ -458,14 +532,13 @@ func Benchmark__RoutedPubSub_100K(b *testing.B) {
 }
 
 func routeQueue(b *testing.B, numQueueSubs, size int) {
-	b.StopTimer()
-
 	s1, o1 := RunServerWithConfig("./configs/srv_a.conf")
 	defer s1.Shutdown()
 	s2, o2 := RunServerWithConfig("./configs/srv_b.conf")
 	defer s2.Shutdown()
 
 	sub := createClientConn(b, o1.Host, o1.Port)
+	defer sub.Close()
 	doDefaultConnect(b, sub)
 	for i := 0; i < numQueueSubs; i++ {
 		sendProto(b, sub, fmt.Sprintf("SUB foo bar %d\r\n", 100+i))
@@ -475,6 +548,7 @@ func routeQueue(b *testing.B, numQueueSubs, size int) {
 	payload := sizedString(size)
 
 	pub := createClientConn(b, o2.Host, o2.Port)
+	defer pub.Close()
 	doDefaultConnect(b, pub)
 	bw := bufio.NewWriterSize(pub, defaultSendBufSize)
 
@@ -482,7 +556,8 @@ func routeQueue(b *testing.B, numQueueSubs, size int) {
 	sendOp := []byte(fmt.Sprintf("PUB foo %d\r\n%s\r\n", len(payload), payload))
 	expected := len(fmt.Sprintf("MSG foo 100 %d\r\n%s\r\n", len(payload), payload)) * b.N
 	go drainConnection(b, sub, ch, expected)
-	b.StartTimer()
+
+	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
 		_, err := bw.Write(sendOp)
@@ -500,8 +575,6 @@ func routeQueue(b *testing.B, numQueueSubs, size int) {
 	<-ch
 
 	b.StopTimer()
-	pub.Close()
-	sub.Close()
 }
 
 func Benchmark____Routed2QueueSub(b *testing.B) {

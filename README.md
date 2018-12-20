@@ -115,10 +115,14 @@ gnatsd -sl reopen
 gnatsd -sl stop
 ```
 
-If there are multiple `gnatsd` processes running, specify a PID:
+If there are multiple `gnatsd` processes running, or if `pgrep` isn't available, you must either specify a PID or the absolute path to a PID file:
 
 ```sh
 gnatsd -sl stop=<pid>
+```
+
+```sh
+gnatsd -sl stop=/path/to/pidfile
 ```
 
 See the [Windows Service](#windows-service) section for information on signaling the NATS server on Windows.
@@ -164,6 +168,7 @@ Server Options:
     -ms,--https_port <port>          Use port for https monitoring
     -c, --config <file>              Configuration file
     -sl,--signal <signal>[=<pid>]    Send signal to gnatsd process (stop, quit, reopen, reload)
+                                     <pid> can be either a PID (e.g. 1) or the path to a PID file (e.g. /var/run/gnatsd.pid)
         --client_advertise <string>  Client URL to advertise to other servers
     -t                               Test configuration and exit
 

@@ -14,12 +14,14 @@
 package server
 
 import (
+	"flag"
 	"fmt"
 	"math/rand"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,7 +71,7 @@ func verifyNumLevels(s *Sublist, expected int, t *testing.T) {
 }
 
 func verifyQMember(qsubs [][]*subscription, val *subscription, t *testing.T) {
-	verifyMember(qsubs[findQSliceForSub(val, qsubs)], val, t)
+	verifyMember(qsubs[findQSlot(val.queue, qsubs)], val, t)
 }
 
 func verifyMember(r []*subscription, val *subscription, t *testing.T) {
@@ -86,12 +88,21 @@ func verifyMember(r []*subscription, val *subscription, t *testing.T) {
 
 // Helpers to generate test subscriptions.
 func newSub(subject string) *subscription {
-	return &subscription{subject: []byte(subject)}
+	c := &client{kind: CLIENT}
+	return &subscription{client: c, subject: []byte(subject)}
 }
 
 func newQSub(subject, queue string) *subscription {
 	if queue != "" {
 		return &subscription{subject: []byte(subject), queue: []byte(queue)}
+	}
+	return newSub(subject)
+}
+
+func newRemoteQSub(subject, queue string, num int32) *subscription {
+	if queue != "" {
+		c := &client{kind: ROUTER}
+		return &subscription{client: c, subject: []byte(subject), queue: []byte(queue), qw: num}
 	}
 	return newSub(subject)
 }
@@ -247,6 +258,34 @@ func TestSublistRemoveWithLargeSubs(t *testing.T) {
 	verifyLen(r.psubs, plistMin*2-3, t)
 }
 
+func TestSublistRemoveByClient(t *testing.T) {
+	s := NewSublist()
+	c := &client{}
+	for i := 0; i < 10; i++ {
+		subject := fmt.Sprintf("a.b.c.d.e.f.%d", i)
+		sub := &subscription{client: c, subject: []byte(subject)}
+		s.Insert(sub)
+	}
+	verifyCount(s, 10, t)
+	s.Insert(&subscription{client: c, subject: []byte(">")})
+	s.Insert(&subscription{client: c, subject: []byte("foo.*")})
+	s.Insert(&subscription{client: c, subject: []byte("foo"), queue: []byte("bar")})
+	s.Insert(&subscription{client: c, subject: []byte("foo"), queue: []byte("bar")})
+	s.Insert(&subscription{client: c, subject: []byte("foo.bar"), queue: []byte("baz")})
+	s.Insert(&subscription{client: c, subject: []byte("foo.bar"), queue: []byte("baz")})
+	verifyCount(s, 16, t)
+	genid := atomic.LoadUint64(&s.genid)
+	s.RemoveAllForClient(c)
+	verifyCount(s, 0, t)
+	// genid should be different
+	if genid == atomic.LoadUint64(&s.genid) {
+		t.Fatalf("GenId should have been changed after removal of subs")
+	}
+	if cc := s.CacheCount(); cc != 0 {
+		t.Fatalf("Cache should be zero, got %d", cc)
+	}
+}
+
 func TestSublistInvalidSubjectsInsert(t *testing.T) {
 	s := NewSublist()
 
@@ -398,8 +437,8 @@ func TestSublistBasicQueueResults(t *testing.T) {
 	r = s.Match(subject)
 	verifyLen(r.psubs, 0, t)
 	verifyQLen(r.qsubs, 2, t)
-	verifyLen(r.qsubs[findQSliceForSub(sub1, r.qsubs)], 1, t)
-	verifyLen(r.qsubs[findQSliceForSub(sub2, r.qsubs)], 2, t)
+	verifyLen(r.qsubs[findQSlot(sub1.queue, r.qsubs)], 1, t)
+	verifyLen(r.qsubs[findQSlot(sub2.queue, r.qsubs)], 2, t)
 	verifyQMember(r.qsubs, sub2, t)
 	verifyQMember(r.qsubs, sub3, t)
 	verifyQMember(r.qsubs, sub4, t)
@@ -757,22 +796,77 @@ func TestSublistRaceOnMatch(t *testing.T) {
 	}
 }
 
-// -- Benchmarks Setup --
+// Remote subscriptions for queue subscribers will be weighted such that a single subscription
+// is received, but represents all of the queue subscribers on the remote side.
+func TestSublistRemoteQueueSubscriptions(t *testing.T) {
+	s := NewSublist()
+	// Normals
+	s1 := newQSub("foo", "bar")
+	s2 := newQSub("foo", "bar")
+	s.Insert(s1)
+	s.Insert(s2)
 
-var subs []*subscription
-var toks = []string{"synadia", "nats", "jetstream", "nkeys", "jwt", "deny", "auth", "drain"}
-var sl = NewSublist()
+	// Now do weighted remotes.
+	rs1 := newRemoteQSub("foo", "bar", 10)
+	s.Insert(rs1)
+	rs2 := newRemoteQSub("foo", "bar", 10)
+	s.Insert(rs2)
 
-func init() {
-	subs = make([]*subscription, 0, 256*1024)
-	subsInit("")
-	for i := 0; i < len(subs); i++ {
-		sl.Insert(subs[i])
-	}
-	addWildcards()
+	// These are just shadowed in results, so should appear as 4 subs.
+	verifyCount(s, 4, t)
+
+	r := s.Match("foo")
+	verifyLen(r.psubs, 0, t)
+	verifyQLen(r.qsubs, 1, t)
+	verifyLen(r.qsubs[0], 22, t)
+
+	s.Remove(s1)
+	s.Remove(rs1)
+
+	verifyCount(s, 2, t)
+
+	// Now make sure our shadowed results are correct after a removal.
+	r = s.Match("foo")
+	verifyLen(r.psubs, 0, t)
+	verifyQLen(r.qsubs, 1, t)
+	verifyLen(r.qsubs[0], 11, t)
+
+	// Now do an update to an existing remote sub to update its weight.
+	rs2.qw = 1
+	s.UpdateRemoteQSub(rs2)
+
+	// Results should reflect new weight.
+	r = s.Match("foo")
+	verifyLen(r.psubs, 0, t)
+	verifyQLen(r.qsubs, 1, t)
+	verifyLen(r.qsubs[0], 2, t)
 }
 
-func subsInit(pre string) {
+// -- Benchmarks Setup --
+
+var benchSublistSubs []*subscription
+var benchSublistSl = NewSublist()
+
+func init() {
+	initSublist := false
+	flag.Parse()
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "test.bench" {
+			initSublist = true
+		}
+	})
+	if initSublist {
+		benchSublistSubs = make([]*subscription, 0, 256*1024)
+		toks := []string{"synadia", "nats", "jetstream", "nkeys", "jwt", "deny", "auth", "drain"}
+		subsInit("", toks)
+		for i := 0; i < len(benchSublistSubs); i++ {
+			benchSublistSl.Insert(benchSublistSubs[i])
+		}
+		addWildcards()
+	}
+}
+
+func subsInit(pre string, toks []string) {
 	var sub string
 	for _, t := range toks {
 		if len(pre) > 0 {
@@ -780,69 +874,61 @@ func subsInit(pre string) {
 		} else {
 			sub = t
 		}
-		subs = append(subs, newSub(sub))
+		benchSublistSubs = append(benchSublistSubs, newSub(sub))
 		if len(strings.Split(sub, tsep)) < 5 {
-			subsInit(sub)
+			subsInit(sub, toks)
 		}
 	}
 }
 
 func addWildcards() {
-	sl.Insert(newSub("cloud.>"))
-	sl.Insert(newSub("cloud.nats.component.>"))
-	sl.Insert(newSub("cloud.*.*.nkeys.*"))
+	benchSublistSl.Insert(newSub("cloud.>"))
+	benchSublistSl.Insert(newSub("cloud.nats.component.>"))
+	benchSublistSl.Insert(newSub("cloud.*.*.nkeys.*"))
 }
 
 // -- Benchmarks Setup End --
 
 func Benchmark______________________SublistInsert(b *testing.B) {
 	s := NewSublist()
-	for i, l := 0, len(subs); i < b.N; i++ {
+	for i, l := 0, len(benchSublistSubs); i < b.N; i++ {
 		index := i % l
-		s.Insert(subs[index])
+		s.Insert(benchSublistSubs[index])
+	}
+}
+
+func benchSublistTokens(b *testing.B, tokens string) {
+	for i := 0; i < b.N; i++ {
+		benchSublistSl.Match(tokens)
 	}
 }
 
 func Benchmark____________SublistMatchSingleToken(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		sl.Match("synadia")
-	}
+	benchSublistTokens(b, "synadia")
 }
 
 func Benchmark______________SublistMatchTwoTokens(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		sl.Match("synadia.nats")
-	}
+	benchSublistTokens(b, "synadia.nats")
 }
 
 func Benchmark____________SublistMatchThreeTokens(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		sl.Match("synadia.nats.jetstream")
-	}
+	benchSublistTokens(b, "synadia.nats.jetstream")
 }
 
 func Benchmark_____________SublistMatchFourTokens(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		sl.Match("synadia.nats.jetstream.nkeys")
-	}
+	benchSublistTokens(b, "synadia.nats.jetstream.nkeys")
 }
 
 func Benchmark_SublistMatchFourTokensSingleResult(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		sl.Match("synadia.nats.jetstream.nkeys")
-	}
+	benchSublistTokens(b, "synadia.nats.jetstream.nkeys")
 }
 
 func Benchmark_SublistMatchFourTokensMultiResults(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		sl.Match("cloud.nats.component.router")
-	}
+	benchSublistTokens(b, "cloud.nats.component.router")
 }
 
 func Benchmark_______SublistMissOnLastTokenOfFive(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		sl.Match("synadia.nats.jetstream.nkeys.ZZZZ")
-	}
+	benchSublistTokens(b, "synadia.nats.jetstream.nkeys.ZZZZ")
 }
 
 func multiRead(b *testing.B, num int) {
@@ -856,7 +942,7 @@ func multiRead(b *testing.B, num int) {
 			swg.Wait()
 			n := b.N / num
 			for i := 0; i < n; i++ {
-				sl.Match(s)
+				benchSublistSl.Match(s)
 			}
 			fwg.Done()
 		}()
@@ -1113,7 +1199,6 @@ func cacheContentionTest(b *testing.B, numMatchers, numAdders, numRemovers int) 
 					index := prand.Intn(lh)
 					sub := subs[index]
 					mu.RUnlock()
-					//fmt.Printf("Removing %d with subject %q\n", index, sub.subject)
 					s.Remove(sub)
 				}
 			}

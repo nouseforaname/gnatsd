@@ -20,15 +20,20 @@ import (
 // Raw length of the nonce challenge
 const (
 	nonceRawLen = 11
-	nonceLen    = 16 // base64.StdEncoding.EncodedLen(nonceRawLen)
+	nonceLen    = 15 // base64.RawURLEncoding.EncodedLen(nonceRawLen)
 )
 
+// NonceRequired tells us if we should send a nonce.
+func (s *Server) NonceRequired() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nonceRequired()
+}
+
 // nonceRequired tells us if we should send a nonce.
-// Assumes server lock is held
+// Lock should be held on entry.
 func (s *Server) nonceRequired() bool {
-	s.optsMu.RLock()
-	defer s.optsMu.RUnlock()
-	return len(s.opts.Nkeys) > 0
+	return len(s.nkeys) > 0 || len(s.trustedKeys) > 0
 }
 
 // Generate a nonce for INFO challenge.
@@ -37,5 +42,5 @@ func (s *Server) generateNonce(n []byte) {
 	var raw [nonceRawLen]byte
 	data := raw[:]
 	s.prand.Read(data)
-	base64.StdEncoding.Encode(n, data)
+	base64.RawURLEncoding.Encode(n, data)
 }

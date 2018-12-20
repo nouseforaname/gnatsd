@@ -34,7 +34,7 @@ import (
 )
 
 type serverInfo struct {
-	Id           string `json:"server_id"`
+	ID           string `json:"server_id"`
 	Host         string `json:"host"`
 	Port         uint   `json:"port"`
 	Version      string `json:"version"`
@@ -258,6 +258,26 @@ func TestClientConnectProto(t *testing.T) {
 		t.Fatalf("Expected err of %q, got  %q\n", ErrBadClientProtocol, err)
 	}
 	wg.Wait()
+}
+
+func TestRemoteAddress(t *testing.T) {
+	c := &client{}
+
+	// though in reality this will panic if it does not, adding coverage anyway
+	if c.RemoteAddress() != nil {
+		t.Errorf("RemoteAddress() did not handle nil connection correctly")
+	}
+
+	_, c, _ = setupClient()
+	addr := c.RemoteAddress()
+
+	if addr.Network() != "pipe" {
+		t.Errorf("RemoteAddress() returned invalid network: %s", addr.Network())
+	}
+
+	if addr.String() != "pipe" {
+		t.Errorf("RemoteAddress() returned invalid string: %s", addr.String())
+	}
 }
 
 func TestClientPing(t *testing.T) {
@@ -663,12 +683,12 @@ func TestClientRemoveSubsOnDisconnect(t *testing.T) {
 	}()
 	<-ch
 
-	if c.sl.Count() != 2 {
-		t.Fatalf("Should have 2 subscriptions, got %d\n", c.sl.Count())
+	if s.NumSubscriptions() != 2 {
+		t.Fatalf("Should have 2 subscriptions, got %d\n", s.NumSubscriptions())
 	}
 	c.closeConnection(ClientClosed)
-	if c.sl.Count() != 0 {
-		t.Fatalf("Should have no subscriptions after close, got %d\n", s.gsl.Count())
+	if s.NumSubscriptions() != 0 {
+		t.Fatalf("Should have no subscriptions after close, got %d\n", s.NumSubscriptions())
 	}
 }
 
@@ -684,8 +704,8 @@ func TestClientDoesNotAddSubscriptionsWhenConnectionClosed(t *testing.T) {
 	}()
 	<-ch
 
-	if c.sl.Count() != 0 {
-		t.Fatalf("Should have no subscriptions after close, got %d\n", c.sl.Count())
+	if c.acc.sl.Count() != 0 {
+		t.Fatalf("Should have no subscriptions after close, got %d\n", c.acc.sl.Count())
 	}
 }
 
@@ -717,8 +737,8 @@ func TestAuthorizationTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error receiving info from server: %v\n", err)
 	}
-	if !strings.Contains(l, "Authorization Timeout") {
-		t.Fatalf("Authorization Timeout response incorrect: %q\n", l)
+	if !strings.Contains(l, "Authentication Timeout") {
+		t.Fatalf("Authentication Timeout response incorrect: %q\n", l)
 	}
 }
 
@@ -841,6 +861,17 @@ func TestTLSCloseClientConnection(t *testing.T) {
 	if state == nil {
 		t.Error("GetTLSConnectionState() returned nil")
 	}
+
+	// Test RemoteAddress
+	addr := cli.RemoteAddress()
+	if addr == nil {
+		t.Error("RemoteAddress() returned nil")
+	}
+
+	if addr.(*net.TCPAddr).IP.String() != "127.0.0.1" {
+		t.Error("RemoteAddress() returned incorrect ip " + addr.String())
+	}
+
 	// Fill the buffer. Need to send 1 byte at a time so that we timeout here
 	// the nc.Close() would block due to a write that can not complete.
 	done := false
@@ -1113,4 +1144,51 @@ func TestQueueAutoUnsubscribe(t *testing.T) {
 		return fmt.Errorf("Did not receive all %d queue messages, received %d for 'bar' and %d for 'baz'",
 			expected, atomic.LoadInt32(&rbar), atomic.LoadInt32(&rbaz))
 	})
+}
+
+func TestClientTraceRace(t *testing.T) {
+	opts := DefaultOptions()
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	// Activate trace logging
+	s.SetLogger(&DummyLogger{}, false, true)
+
+	nc1, err := nats.Connect(fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc1.Close()
+	total := 10000
+	count := 0
+	ch := make(chan bool, 1)
+	if _, err := nc1.Subscribe("foo", func(_ *nats.Msg) {
+		count++
+		if count == total {
+			ch <- true
+		}
+	}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	nc2, err := nats.Connect(fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc2.Close()
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < total; i++ {
+			nc1.Publish("bar", []byte("hello"))
+		}
+	}()
+	for i := 0; i < total; i++ {
+		nc2.Publish("foo", []byte("hello"))
+	}
+	if err := wait(ch); err != nil {
+		t.Fatal("Did not get all our messages")
+	}
+	wg.Wait()
 }

@@ -16,11 +16,10 @@ package server
 import (
 	"crypto/tls"
 	"encoding/base64"
-	"sort"
+	"net"
 	"strings"
-	"sync"
-	"time"
 
+	"github.com/nats-io/jwt"
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -39,327 +38,11 @@ type ClientAuthentication interface {
 	GetTLSConnectionState() *tls.ConnectionState
 	// Optionally map a user after auth.
 	RegisterUser(*User)
+	// RemoteAddress expose the connection information of the client
+	RemoteAddress() net.Addr
 }
 
-// Accounts
-type Account struct {
-	Name     string
-	Nkey     string
-	mu       sync.RWMutex
-	sl       *Sublist
-	imports  importMap
-	exports  exportMap
-	nae      int
-	maxnae   int
-	maxaettl time.Duration
-	pruning  bool
-}
-
-// Import stream mapping struct
-type streamImport struct {
-	acc    *Account
-	from   string
-	prefix string
-}
-
-// Import service mapping struct
-type serviceImport struct {
-	acc  *Account
-	from string
-	to   string
-	ae   bool
-	ts   int64
-}
-
-// importMap tracks the imported streams and services.
-type importMap struct {
-	streams  map[string]*streamImport
-	services map[string]*serviceImport // TODO(dlc) sync.Map may be better.
-}
-
-// exportMap tracks the exported streams and services.
-type exportMap struct {
-	streams  map[string]map[string]*Account
-	services map[string]map[string]*Account
-}
-
-func (a *Account) addServiceExport(subject string, accounts []*Account) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a == nil {
-		return ErrMissingAccount
-	}
-	if a.exports.services == nil {
-		a.exports.services = make(map[string]map[string]*Account)
-	}
-	ma := a.exports.services[subject]
-	if accounts != nil && ma == nil {
-		ma = make(map[string]*Account)
-	}
-	for _, a := range accounts {
-		ma[a.Name] = a
-	}
-	a.exports.services[subject] = ma
-	return nil
-}
-
-// numServiceRoutes returns the number of service routes on this account.
-func (a *Account) numServiceRoutes() int {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return len(a.imports.services)
-}
-
-// This will add a route to an account to send published messages / requests
-// to the destination account. From is the local subject to map, To is the
-// subject that will appear on the destination account. Destination will need
-// to have an import rule to allow access via addService.
-func (a *Account) addServiceImport(destination *Account, from, to string) error {
-	if destination == nil {
-		return ErrMissingAccount
-	}
-	// Empty means use from.
-	if to == "" {
-		to = from
-	}
-	if !IsValidLiteralSubject(from) || !IsValidLiteralSubject(to) {
-		return ErrInvalidSubject
-	}
-	// First check to see if the account has authorized us to route to the "to" subject.
-	if !destination.checkServiceImportAuthorized(a, to) {
-		return ErrServiceImportAuthorization
-	}
-
-	return a.addImplicitServiceImport(destination, from, to, false)
-}
-
-// removeServiceImport will remove the route by subject.
-func (a *Account) removeServiceImport(subject string) {
-	a.mu.Lock()
-	si, ok := a.imports.services[subject]
-	if ok && si != nil && si.ae {
-		a.nae--
-	}
-	delete(a.imports.services, subject)
-	a.mu.Unlock()
-}
-
-// Return the number of AutoExpireResponseMaps for request/reply. These are mapped to the account that
-func (a *Account) numAutoExpireResponseMaps() int {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.nae
-}
-
-// Set the max outstanding auto expire response maps.
-func (a *Account) setMaxAutoExpireResponseMaps(max int) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.maxnae = max
-}
-
-// Set the max ttl for response maps.
-func (a *Account) setMaxAutoExpireTTL(ttl time.Duration) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.maxaettl = ttl
-}
-
-// Return a list of the current autoExpireResponseMaps.
-func (a *Account) autoExpireResponseMaps() []*serviceImport {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if len(a.imports.services) == 0 {
-		return nil
-	}
-	aesis := make([]*serviceImport, 0, len(a.imports.services))
-	for _, si := range a.imports.services {
-		if si.ae {
-			aesis = append(aesis, si)
-		}
-	}
-	sort.Slice(aesis, func(i, j int) bool {
-		return aesis[i].ts < aesis[j].ts
-	})
-	return aesis
-}
-
-// Add a route to connect from an implicit route created for a response to a request.
-// This does no checks and should be only called by the msg processing code. Use addRoute
-// above if responding to user input or config, etc.
-func (a *Account) addImplicitServiceImport(destination *Account, from, to string, autoexpire bool) error {
-	a.mu.Lock()
-	if a.imports.services == nil {
-		a.imports.services = make(map[string]*serviceImport)
-	}
-	si := &serviceImport{destination, from, to, autoexpire, 0}
-	a.imports.services[from] = si
-	if autoexpire {
-		a.nae++
-		si.ts = time.Now().Unix()
-		if a.nae > a.maxnae && !a.pruning {
-			a.pruning = true
-			go a.pruneAutoExpireResponseMaps()
-		}
-	}
-	a.mu.Unlock()
-	return nil
-}
-
-// This will prune the list to below the threshold and remove all ttl'd maps.
-func (a *Account) pruneAutoExpireResponseMaps() {
-	defer func() {
-		a.mu.Lock()
-		a.pruning = false
-		a.mu.Unlock()
-	}()
-
-	a.mu.RLock()
-	ttl := int64(a.maxaettl/time.Second) + 1
-	a.mu.RUnlock()
-
-	for {
-		sis := a.autoExpireResponseMaps()
-
-		// Check ttl items.
-		now := time.Now().Unix()
-		for i, si := range sis {
-			if now-si.ts >= ttl {
-				a.removeServiceImport(si.from)
-			} else {
-				sis = sis[i:]
-				break
-			}
-		}
-
-		a.mu.RLock()
-		numOver := a.nae - a.maxnae
-		a.mu.RUnlock()
-
-		if numOver <= 0 {
-			return
-		} else if numOver >= len(sis) {
-			numOver = len(sis) - 1
-		}
-		// These are in sorted order, remove at least numOver
-		for _, si := range sis[:numOver] {
-			a.removeServiceImport(si.from)
-		}
-	}
-}
-
-// addStreamImport will add in the stream import from a specific account.
-func (a *Account) addStreamImport(account *Account, from, prefix string) error {
-	if account == nil {
-		return ErrMissingAccount
-	}
-
-	// First check to see if the account has authorized export of the subject.
-	if !account.checkStreamImportAuthorized(a, from) {
-		return ErrStreamImportAuthorization
-	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.imports.streams == nil {
-		a.imports.streams = make(map[string]*streamImport)
-	}
-	if prefix != "" && prefix[len(prefix)-1] != btsep {
-		prefix = prefix + string(btsep)
-	}
-	// TODO(dlc) - collisions, etc.
-	a.imports.streams[from] = &streamImport{account, from, prefix}
-	return nil
-}
-
-// Placeholder to denote public export.
-var isPublicExport = []*Account(nil)
-
-// addExport will add an export to the account. If accounts is nil
-// it will signify a public export, meaning anyone can impoort.
-func (a *Account) addStreamExport(subject string, accounts []*Account) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a == nil {
-		return ErrMissingAccount
-	}
-	if a.exports.streams == nil {
-		a.exports.streams = make(map[string]map[string]*Account)
-	}
-	var ma map[string]*Account
-	for _, aa := range accounts {
-		if ma == nil {
-			ma = make(map[string]*Account, len(accounts))
-		}
-		ma[aa.Name] = aa
-	}
-	a.exports.streams[subject] = ma
-	return nil
-}
-
-// Check if another account is authorized to import from us.
-func (a *Account) checkStreamImportAuthorized(account *Account, subject string) bool {
-	// Find the subject in the exports list.
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	if a.exports.streams == nil || !IsValidSubject(subject) {
-		return false
-	}
-
-	// Check direct match of subject first
-	am, ok := a.exports.streams[subject]
-	if ok {
-		// if am is nil that denotes a public export
-		if am == nil {
-			return true
-		}
-		// If we have a matching account we are authorized
-		_, ok := am[account.Name]
-		return ok
-	}
-	// ok if we are here we did not match directly so we need to test each one.
-	// The import subject arg has to take precedence, meaning the export
-	// has to be a true subset of the import claim. We already checked for
-	// exact matches above.
-
-	tokens := strings.Split(subject, tsep)
-	for subj, am := range a.exports.streams {
-		if isSubsetMatch(tokens, subj) {
-			if am == nil {
-				return true
-			}
-			_, ok := am[account.Name]
-			return ok
-		}
-	}
-	return false
-}
-
-// Check if another account is authorized to route requests to this service.
-func (a *Account) checkServiceImportAuthorized(account *Account, subject string) bool {
-	// Find the subject in the services list.
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	if a.exports.services == nil || !IsValidLiteralSubject(subject) {
-		return false
-	}
-	// These are always literal subjects so just lookup.
-	am, ok := a.exports.services[subject]
-	if !ok {
-		return false
-	}
-	// Check to see if we are public or if we need to search for the account.
-	if am == nil {
-		return true
-	}
-	// Check that we allow this account.
-	_, ok = am[account.Name]
-	return ok
-}
-
-// Nkey is for multiple nkey based users
+// NkeyUser is for multiple nkey based users
 type NkeyUser struct {
 	Nkey        string       `json:"user"`
 	Permissions *Permissions `json:"permissions,omitempty"`
@@ -420,6 +103,24 @@ type RoutePermissions struct {
 	Export *SubjectPermission `json:"export"`
 }
 
+// GatewayPermissions are similar to RoutePermissions
+type GatewayPermissions = RoutePermissions
+
+// clone will clone a RoutePermissions object
+func (rp *RoutePermissions) clone() *RoutePermissions {
+	if rp == nil {
+		return nil
+	}
+	clone := &RoutePermissions{}
+	if rp.Import != nil {
+		clone.Import = rp.Import.clone()
+	}
+	if rp.Export != nil {
+		clone.Export = rp.Export.clone()
+	}
+	return clone
+}
+
 // clone will clone an individual subject permission.
 func (p *SubjectPermission) clone() *SubjectPermission {
 	if p == nil {
@@ -472,6 +173,22 @@ func (s *Server) checkAuthforWarnings() {
 	}
 }
 
+// If opts.Users or opts.Nkeys have definitions without an account
+// defined assign them to the default global account.
+// Lock should be held.
+func (s *Server) assignGlobalAccountToOrphanUsers() {
+	for _, u := range s.users {
+		if u.Account == nil {
+			u.Account = s.gacc
+		}
+	}
+	for _, u := range s.nkeys {
+		if u.Account == nil {
+			u.Account = s.gacc
+		}
+	}
+}
+
 // configureAuthorization will do any setup needed for authorization.
 // Lock is assumed held.
 func (s *Server) configureAuthorization() {
@@ -486,20 +203,31 @@ func (s *Server) configureAuthorization() {
 	// This just checks and sets up the user map if we have multiple users.
 	if opts.CustomClientAuthentication != nil {
 		s.info.AuthRequired = true
+	} else if len(s.trustedKeys) > 0 {
+		s.info.AuthRequired = true
 	} else if opts.Nkeys != nil || opts.Users != nil {
 		// Support both at the same time.
 		if opts.Nkeys != nil {
 			s.nkeys = make(map[string]*NkeyUser)
 			for _, u := range opts.Nkeys {
-				s.nkeys[u.Nkey] = u
+				copy := u.clone()
+				if u.Account != nil {
+					copy.Account = s.accounts[u.Account.Name]
+				}
+				s.nkeys[u.Nkey] = copy
 			}
 		}
 		if opts.Users != nil {
 			s.users = make(map[string]*User)
 			for _, u := range opts.Users {
-				s.users[u.Username] = u
+				copy := u.clone()
+				if u.Account != nil {
+					copy.Account = s.accounts[u.Account.Name]
+				}
+				s.users[u.Username] = copy
 			}
 		}
+		s.assignGlobalAccountToOrphanUsers()
 		s.info.AuthRequired = true
 	} else if opts.Username != "" || opts.Authorization != "" {
 		s.info.AuthRequired = true
@@ -509,14 +237,16 @@ func (s *Server) configureAuthorization() {
 	}
 }
 
-// checkAuthorization will check authorization based on client type and
+// checkAuthentication will check based on client type and
 // return boolean indicating if client is authorized.
-func (s *Server) checkAuthorization(c *client) bool {
-	switch c.typ {
+func (s *Server) checkAuthentication(c *client) bool {
+	switch c.kind {
 	case CLIENT:
 		return s.isClientAuthorized(c)
 	case ROUTER:
 		return s.isRouterAuthorized(c)
+	case GATEWAY:
+		return s.isGatewayAuthorized(c)
 	default:
 		return false
 	}
@@ -531,16 +261,23 @@ func (s *Server) isClientAuthorized(c *client) bool {
 	authorization := s.opts.Authorization
 	username := s.opts.Username
 	password := s.opts.Password
+	tlsMap := s.opts.TLSMap
 	s.optsMu.RUnlock()
 
-	// Check custom auth first, then nkeys, then multiple users, then token, then single user/pass.
+	// Check custom auth first, then jwts, then nkeys, then multiple users, then token, then single user/pass.
 	if customClientAuthentication != nil {
 		return customClientAuthentication.Check(c)
 	}
 
-	var nkey *NkeyUser
-	var user *User
-	var ok bool
+	// Grab under lock but process after.
+	var (
+		nkey *NkeyUser
+		juc  *jwt.UserClaims
+		acc  *Account
+		user *User
+		ok   bool
+		err  error
+	)
 
 	s.mu.Lock()
 	authRequired := s.info.AuthRequired
@@ -548,6 +285,29 @@ func (s *Server) isClientAuthorized(c *client) bool {
 		// TODO(dlc) - If they send us credentials should we fail?
 		s.mu.Unlock()
 		return true
+	}
+
+	// Check if we have trustedKeys defined in the server. If so we require a user jwt.
+	if s.trustedKeys != nil {
+		if c.opts.JWT == "" {
+			s.mu.Unlock()
+			c.Debugf("Authentication requires a user JWT")
+			return false
+		}
+		// So we have a valid user jwt here.
+		juc, err = jwt.DecodeUserClaims(c.opts.JWT)
+		if err != nil {
+			s.mu.Unlock()
+			c.Debugf("User JWT not valid: %v", err)
+			return false
+		}
+		vr := jwt.CreateValidationResults()
+		juc.Validate(vr)
+		if vr.IsBlocking(true) {
+			s.mu.Unlock()
+			c.Debugf("User JWT no longer valid: %+v", vr)
+			return false
+		}
 	}
 
 	// Check if we have nkeys or users for client.
@@ -559,29 +319,122 @@ func (s *Server) isClientAuthorized(c *client) bool {
 			s.mu.Unlock()
 			return false
 		}
-	} else if hasUsers && c.opts.Username != "" {
-		user, ok = s.users[c.opts.Username]
-		if !ok {
-			s.mu.Unlock()
-			return false
+	} else if hasUsers {
+		// Check if we are tls verify and are mapping users from the client_certificate
+		if tlsMap {
+			tlsState := c.GetTLSConnectionState()
+			if tlsState == nil {
+				c.Debugf("User required in cert, no TLS connection state")
+				s.mu.Unlock()
+				return false
+			}
+			if len(tlsState.PeerCertificates) == 0 {
+				c.Debugf("User required in cert, no peer certificates found")
+				s.mu.Unlock()
+				return false
+			}
+			cert := tlsState.PeerCertificates[0]
+			if len(tlsState.PeerCertificates) > 1 {
+				c.Debugf("Multiple peer certificates found, selecting first")
+			}
+			if len(cert.EmailAddresses) == 0 {
+				c.Debugf("User required in cert, none found")
+				s.mu.Unlock()
+				return false
+			}
+			euser := cert.EmailAddresses[0]
+			user, ok = s.users[euser]
+			if !ok {
+				c.Debugf("User in cert [%q], not found", euser)
+				s.mu.Unlock()
+				return false
+			}
+			if len(cert.EmailAddresses) > 1 {
+				c.Debugf("Multiple users found in cert, selecting first [%q]", euser)
+			}
+			if c.opts.Username != "" {
+				s.Warnf("User found in connect proto, but user required from cert - %v", c)
+			}
+		} else if c.opts.Username != "" {
+			user, ok = s.users[c.opts.Username]
+			if !ok {
+				s.mu.Unlock()
+				return false
+			}
 		}
 	}
 	s.mu.Unlock()
 
-	// Verify the signature against the nonce.
-	if nkey != nil {
+	// If we have a jwt and a userClaim, make sure we have the Account, etc associated.
+	// We need to look up the account. This will use an account resolver if one is present.
+	if juc != nil {
+		if acc, _ = s.LookupAccount(juc.Issuer); acc == nil {
+			c.Debugf("Account JWT can not be found")
+			return false
+		}
+		if !s.isTrustedIssuer(acc.Issuer) {
+			c.Debugf("Account JWT not signed by trusted operator")
+			return false
+		}
+		if acc.IsExpired() {
+			c.Debugf("Account JWT has expired")
+			return false
+		}
+		// Verify the signature against the nonce.
 		if c.opts.Sig == "" {
+			c.Debugf("Signature missing")
 			return false
 		}
-		sig, err := base64.StdEncoding.DecodeString(c.opts.Sig)
+		sig, err := base64.RawURLEncoding.DecodeString(c.opts.Sig)
 		if err != nil {
-			return false
+			// Allow fallback to normal base64.
+			sig, err = base64.StdEncoding.DecodeString(c.opts.Sig)
+			if err != nil {
+				c.Debugf("Signature not valid base64")
+				return false
+			}
 		}
-		pub, err := nkeys.FromPublicKey(c.opts.Nkey)
+		pub, err := nkeys.FromPublicKey(juc.Subject)
 		if err != nil {
+			c.Debugf("User nkey not valid: %v", err)
 			return false
 		}
 		if err := pub.Verify(c.nonce, sig); err != nil {
+			c.Debugf("Signature not verified")
+			return false
+		}
+		nkey = buildInternalNkeyUser(juc, acc)
+		c.RegisterNkeyUser(nkey)
+
+		// Generate an event if we have a system account.
+		s.accountConnectEvent(c)
+
+		// Check if we need to set an auth timer if the user jwt expires.
+		c.checkExpiration(juc.Claims())
+		return true
+	}
+
+	if nkey != nil {
+		if c.opts.Sig == "" {
+			c.Debugf("Signature missing")
+			return false
+		}
+		sig, err := base64.RawURLEncoding.DecodeString(c.opts.Sig)
+		if err != nil {
+			// Allow fallback to normal base64.
+			sig, err = base64.StdEncoding.DecodeString(c.opts.Sig)
+			if err != nil {
+				c.Debugf("Signature not valid base64")
+				return false
+			}
+		}
+		pub, err := nkeys.FromPublicKey(c.opts.Nkey)
+		if err != nil {
+			c.Debugf("User nkey not valid: %v", err)
+			return false
+		}
+		if err := pub.Verify(c.nonce, sig); err != nil {
+			c.Debugf("Signature not verified")
 			return false
 		}
 		c.RegisterNkeyUser(nkey)
@@ -630,6 +483,19 @@ func (s *Server) isRouterAuthorized(c *client) bool {
 		return false
 	}
 	return true
+}
+
+// isGatewayAuthorized checks optional gateway authorization which can be nil or username/password.
+func (s *Server) isGatewayAuthorized(c *client) bool {
+	// Snapshot server options.
+	opts := s.getOpts()
+	if opts.Gateway.Username == "" {
+		return true
+	}
+	if opts.Gateway.Username != c.opts.Username {
+		return false
+	}
+	return comparePasswords(opts.Gateway.Password, c.opts.Password)
 }
 
 // Support for bcrypt stored passwords and tokens.

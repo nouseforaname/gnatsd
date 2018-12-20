@@ -14,11 +14,15 @@
 package server
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -59,10 +63,9 @@ func RunServer(opts *Options) *Server {
 	if opts == nil {
 		opts = DefaultOptions()
 	}
-	s := New(opts)
-
-	if s == nil {
-		panic("No NATS Server object returned.")
+	s, err := NewServer(opts)
+	if err != nil || s == nil {
+		panic(fmt.Sprintf("No NATS Server object returned: %v", err))
 	}
 
 	if !opts.NoLog {
@@ -509,57 +512,6 @@ func TestWriteDeadline(t *testing.T) {
 	t.Fatal("Connection should have been closed")
 }
 
-func TestSlowConsumerPendingBytes(t *testing.T) {
-	opts := DefaultOptions()
-	opts.WriteDeadline = 30 * time.Second // Wait for long time so write deadline does not trigger slow consumer.
-	opts.MaxPending = 1 * 1024 * 1024     // Set to low value (1MB) to allow SC to trip.
-	s := RunServer(opts)
-	defer s.Shutdown()
-
-	c, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", opts.Host, opts.Port), 3*time.Second)
-	if err != nil {
-		t.Fatalf("Error on connect: %v", err)
-	}
-	defer c.Close()
-	if _, err := c.Write([]byte("CONNECT {}\r\nPING\r\nSUB foo 1\r\n")); err != nil {
-		t.Fatalf("Error sending protocols to server: %v", err)
-	}
-	// Reduce socket buffer to increase reliability of data backing up in the server destined
-	// for our subscribed client.
-	c.(*net.TCPConn).SetReadBuffer(128)
-
-	url := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
-	sender, err := nats.Connect(url)
-	if err != nil {
-		t.Fatalf("Error on connect: %v", err)
-	}
-	defer sender.Close()
-
-	payload := make([]byte, 1024*1024)
-	for i := 0; i < 100; i++ {
-		if err := sender.Publish("foo", payload); err != nil {
-			t.Fatalf("Error on publish: %v", err)
-		}
-	}
-
-	// Flush sender connection to ensure that all data has been sent.
-	if err := sender.Flush(); err != nil {
-		t.Fatalf("Error on flush: %v", err)
-	}
-
-	// At this point server should have closed connection c.
-
-	// On certain platforms, it may take more than one call before
-	// getting the error.
-	for i := 0; i < 100; i++ {
-		if _, err := c.Write([]byte("PUB bar 5\r\nhello\r\n")); err != nil {
-			// ok
-			return
-		}
-	}
-	t.Fatal("Connection should have been closed")
-}
-
 func TestRandomPorts(t *testing.T) {
 	opts := DefaultOptions()
 	opts.HTTPPort = -1
@@ -696,5 +648,377 @@ func TestProfilingNoTimeout(t *testing.T) {
 	}
 	if srv.WriteTimeout != 0 {
 		t.Fatalf("WriteTimeout should not be set, was set to %v", srv.WriteTimeout)
+	}
+}
+
+func TestLameDuckMode(t *testing.T) {
+	atomic.StoreInt64(&lameDuckModeInitialDelay, 0)
+	defer atomic.StoreInt64(&lameDuckModeInitialDelay, lameDuckModeDefaultInitialDelay)
+
+	optsA := DefaultOptions()
+	optsA.Cluster.Host = "127.0.0.1"
+	srvA := RunServer(optsA)
+	defer srvA.Shutdown()
+
+	// Check that if there is no client, server is shutdown
+	srvA.lameDuckMode()
+	srvA.mu.Lock()
+	shutdown := srvA.shutdown
+	srvA.mu.Unlock()
+	if !shutdown {
+		t.Fatalf("Server should have shutdown")
+	}
+
+	optsA.LameDuckDuration = 10 * time.Nanosecond
+	srvA = RunServer(optsA)
+	defer srvA.Shutdown()
+
+	optsB := DefaultOptions()
+	optsB.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", srvA.ClusterAddr().Port))
+	srvB := RunServer(optsB)
+	defer srvB.Shutdown()
+
+	checkClusterFormed(t, srvA, srvB)
+
+	total := 50
+	connectClients := func() []*nats.Conn {
+		ncs := make([]*nats.Conn, 0, total)
+		for i := 0; i < total; i++ {
+			nc, err := nats.Connect(fmt.Sprintf("nats://%s:%d", optsA.Host, optsA.Port),
+				nats.ReconnectWait(50*time.Millisecond))
+			if err != nil {
+				t.Fatalf("Error on connect: %v", err)
+			}
+			ncs = append(ncs, nc)
+		}
+		return ncs
+	}
+	stopClientsAndSrvB := func(ncs []*nats.Conn) {
+		for _, nc := range ncs {
+			nc.Close()
+		}
+		srvB.Shutdown()
+	}
+
+	ncs := connectClients()
+
+	checkClientsCount(t, srvA, total)
+	checkClientsCount(t, srvB, 0)
+
+	start := time.Now()
+	srvA.lameDuckMode()
+	// Make sure that nothing bad happens if called twice
+	srvA.lameDuckMode()
+	// Wait that shutdown completes
+	elapsed := time.Since(start)
+	// It should have taken more than the allotted time of 10ms since we had 50 clients.
+	if elapsed <= optsA.LameDuckDuration {
+		t.Fatalf("Expected to take more than %v, got %v", optsA.LameDuckDuration, elapsed)
+	}
+
+	checkClientsCount(t, srvA, 0)
+	checkClientsCount(t, srvB, total)
+
+	// Check closed status on server A
+	cz := pollConz(t, srvA, 1, "", &ConnzOptions{State: ConnClosed})
+	if n := len(cz.Conns); n != total {
+		t.Fatalf("Expected %v closed connections, got %v", total, n)
+	}
+	for _, c := range cz.Conns {
+		checkReason(t, c.Reason, ServerShutdown)
+	}
+
+	stopClientsAndSrvB(ncs)
+
+	optsA.LameDuckDuration = time.Second
+	srvA = RunServer(optsA)
+	defer srvA.Shutdown()
+
+	optsB.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", srvA.ClusterAddr().Port))
+	srvB = RunServer(optsB)
+	defer srvB.Shutdown()
+
+	checkClusterFormed(t, srvA, srvB)
+
+	ncs = connectClients()
+
+	checkClientsCount(t, srvA, total)
+	checkClientsCount(t, srvB, 0)
+
+	start = time.Now()
+	go srvA.lameDuckMode()
+	// Check that while in lameDuckMode, it is not possible to connect
+	// to the server. Wait to be in LD mode first
+	checkFor(t, 500*time.Millisecond, 15*time.Millisecond, func() error {
+		srvA.mu.Lock()
+		ldm := srvA.ldm
+		srvA.mu.Unlock()
+		if !ldm {
+			return fmt.Errorf("Did not reach lame duck mode")
+		}
+		return nil
+	})
+	if _, err := nats.Connect(fmt.Sprintf("nats://%s:%d", optsA.Host, optsA.Port)); err != nats.ErrNoServers {
+		t.Fatalf("Expected %v, got %v", nats.ErrNoServers, err)
+	}
+	srvA.grWG.Wait()
+	elapsed = time.Since(start)
+
+	checkClientsCount(t, srvA, 0)
+	checkClientsCount(t, srvB, total)
+
+	if elapsed > optsA.LameDuckDuration {
+		t.Fatalf("Expected to not take more than %v, got %v", optsA.LameDuckDuration, elapsed)
+	}
+
+	stopClientsAndSrvB(ncs)
+
+	// Now check that we can shutdown server while in LD mode.
+	optsA.LameDuckDuration = 60 * time.Second
+	srvA = RunServer(optsA)
+	defer srvA.Shutdown()
+
+	optsB.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", srvA.ClusterAddr().Port))
+	srvB = RunServer(optsB)
+	defer srvB.Shutdown()
+
+	checkClusterFormed(t, srvA, srvB)
+
+	ncs = connectClients()
+
+	checkClientsCount(t, srvA, total)
+	checkClientsCount(t, srvB, 0)
+
+	start = time.Now()
+	go srvA.lameDuckMode()
+	time.Sleep(100 * time.Millisecond)
+	srvA.Shutdown()
+	elapsed = time.Since(start)
+	// Make sure that it did not take that long
+	if elapsed > time.Second {
+		t.Fatalf("Took too long: %v", elapsed)
+	}
+	checkClientsCount(t, srvA, 0)
+	checkClientsCount(t, srvB, total)
+
+	stopClientsAndSrvB(ncs)
+
+	// Now test that we introduce delay before starting closing client connections.
+	// This allow to "signal" multiple servers and avoid their clients to reconnect
+	// to a server that is going to be going in LD mode.
+	atomic.StoreInt64(&lameDuckModeInitialDelay, int64(100*time.Millisecond))
+
+	optsA.LameDuckDuration = 10 * time.Millisecond
+	srvA = RunServer(optsA)
+	defer srvA.Shutdown()
+
+	optsB.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", srvA.ClusterAddr().Port))
+	optsB.LameDuckDuration = 10 * time.Millisecond
+	srvB = RunServer(optsB)
+	defer srvB.Shutdown()
+
+	optsC := DefaultOptions()
+	optsC.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", srvA.ClusterAddr().Port))
+	optsC.LameDuckDuration = 10 * time.Millisecond
+	srvC := RunServer(optsC)
+	defer srvC.Shutdown()
+
+	checkClusterFormed(t, srvA, srvB, srvC)
+
+	rt := int32(0)
+	nc, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", optsA.Port),
+		nats.ReconnectWait(15*time.Millisecond),
+		nats.ReconnectHandler(func(*nats.Conn) {
+			atomic.AddInt32(&rt, 1)
+		}))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	go srvA.lameDuckMode()
+	// Wait a bit, but less than lameDuckModeInitialDelay that we set in this
+	// test to 100ms.
+	time.Sleep(30 * time.Millisecond)
+	go srvB.lameDuckMode()
+
+	srvA.grWG.Wait()
+	srvB.grWG.Wait()
+	checkClientsCount(t, srvC, 1)
+	checkFor(t, 2*time.Second, 15*time.Millisecond, func() error {
+		if n := atomic.LoadInt32(&rt); n != 1 {
+			return fmt.Errorf("Expected client to reconnect only once, got %v", n)
+		}
+		return nil
+	})
+}
+
+func TestServerValidateGatewaysOptions(t *testing.T) {
+	baseOpt := testDefaultOptionsForGateway("A")
+	u, _ := url.Parse("host:5222")
+	g := &RemoteGatewayOpts{
+		URLs: []*url.URL{u},
+	}
+	baseOpt.Gateway.Gateways = append(baseOpt.Gateway.Gateways, g)
+
+	for _, test := range []struct {
+		name        string
+		opts        func() *Options
+		expectedErr string
+	}{
+		{
+			name: "gateway_has_no_name",
+			opts: func() *Options {
+				o := baseOpt.Clone()
+				o.Gateway.Name = ""
+				return o
+			},
+			expectedErr: "has no name",
+		},
+		{
+			name: "gateway_has_no_port",
+			opts: func() *Options {
+				o := baseOpt.Clone()
+				o.Gateway.Port = 0
+				return o
+			},
+			expectedErr: "no port specified",
+		},
+		{
+			name: "gateway_dst_has_no_name",
+			opts: func() *Options {
+				o := baseOpt.Clone()
+				return o
+			},
+			expectedErr: "has no name",
+		},
+		{
+			name: "gateway_dst_urls_is_nil",
+			opts: func() *Options {
+				o := baseOpt.Clone()
+				o.Gateway.Gateways[0].Name = "B"
+				o.Gateway.Gateways[0].URLs = nil
+				return o
+			},
+			expectedErr: "has no URL",
+		},
+		{
+			name: "gateway_dst_urls_is_empty",
+			opts: func() *Options {
+				o := baseOpt.Clone()
+				o.Gateway.Gateways[0].Name = "B"
+				o.Gateway.Gateways[0].URLs = []*url.URL{}
+				return o
+			},
+			expectedErr: "has no URL",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateOptions(test.opts()); err == nil || !strings.Contains(err.Error(), test.expectedErr) {
+				t.Fatalf("Expected error about %q, got %v", test.expectedErr, err)
+			}
+		})
+	}
+}
+
+func TestAcceptError(t *testing.T) {
+	o := DefaultOptions()
+	s := New(o)
+	s.mu.Lock()
+	s.running = true
+	s.mu.Unlock()
+	defer s.Shutdown()
+	orgDelay := time.Hour
+	delay := s.acceptError("Test", fmt.Errorf("any error"), orgDelay)
+	if delay != orgDelay {
+		t.Fatalf("With this type of error, delay should have stayed same, got %v", delay)
+	}
+
+	// Create any net.Error and make it a temporary
+	ne := &net.DNSError{IsTemporary: true}
+	orgDelay = 10 * time.Millisecond
+	delay = s.acceptError("Test", ne, orgDelay)
+	if delay != 2*orgDelay {
+		t.Fatalf("Expected delay to double, got %v", delay)
+	}
+	// Now check the max
+	orgDelay = 60 * ACCEPT_MAX_SLEEP / 100
+	delay = s.acceptError("Test", ne, orgDelay)
+	if delay != ACCEPT_MAX_SLEEP {
+		t.Fatalf("Expected delay to double, got %v", delay)
+	}
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	start := time.Now()
+	go func() {
+		s.acceptError("Test", ne, orgDelay)
+		wg.Done()
+	}()
+	time.Sleep(100 * time.Millisecond)
+	// This should kick out the sleep in acceptError
+	s.Shutdown()
+	if dur := time.Since(start); dur >= ACCEPT_MAX_SLEEP {
+		t.Fatalf("Shutdown took too long: %v", dur)
+	}
+}
+
+type myDummyDNSResolver struct {
+	ips []string
+	err error
+}
+
+func (r *myDummyDNSResolver) LookupHost(ctx context.Context, host string) ([]string, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.ips, nil
+}
+
+func TestGetRandomIP(t *testing.T) {
+	s := &Server{}
+	resolver := &myDummyDNSResolver{}
+	// no port...
+	if _, err := s.getRandomIP(resolver, "noport"); err == nil || !strings.Contains(err.Error(), "port") {
+		t.Fatalf("Expected error about port missing, got %v", err)
+	}
+	resolver.err = fmt.Errorf("on purpose")
+	if _, err := s.getRandomIP(resolver, "localhost:4222"); err == nil || !strings.Contains(err.Error(), "on purpose") {
+		t.Fatalf("Expected error about no port, got %v", err)
+	}
+	resolver.err = nil
+	a, err := s.getRandomIP(resolver, "localhost:4222")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if a != "localhost:4222" {
+		t.Fatalf("Expected address to be %q, got %q", "localhost:4222", a)
+	}
+	resolver.ips = []string{"1.2.3.4"}
+	a, err = s.getRandomIP(resolver, "localhost:4222")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if a != "1.2.3.4:4222" {
+		t.Fatalf("Expected address to be %q, got %q", "1.2.3.4:4222", a)
+	}
+	// Check for randomness
+	resolver.ips = []string{"1.2.3.4", "2.2.3.4", "3.2.3.4"}
+	dist := [3]int{}
+	for i := 0; i < 100; i++ {
+		ip, err := s.getRandomIP(resolver, "localhost:4222")
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		v := int(ip[0]-'0') - 1
+		dist[v]++
+	}
+	low := 20
+	high := 47
+	for i, d := range dist {
+		if d == 0 || d == 100 {
+			t.Fatalf("Unexpected distribution for ip %v, got %v", i, d)
+		} else if d < low || d > high {
+			t.Logf("Warning: out of expected range [%v,%v] for ip %v, got %v", low, high, i, d)
+		}
 	}
 }

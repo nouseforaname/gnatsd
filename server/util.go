@@ -22,14 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/nats-io/nuid"
 )
-
-// Use nuid.
-func genID() string {
-	return nuid.Next()
-}
 
 // Ascii numbers 0-9
 const (

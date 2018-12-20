@@ -73,7 +73,7 @@ type ConnzOptions struct {
 	State ConnState `json:"state"`
 }
 
-// For filtering states of connections. We will only have two, open and closed.
+// ConnState is for filtering states of connections. We will only have two, open and closed.
 type ConnState int
 
 const (
@@ -193,9 +193,10 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 	case ConnClosed:
 		c.Total = s.closed.len()
 		closedClients = s.closed.closedClients()
+		c.Total = len(closedClients)
 	case ConnAll:
-		c.Total = len(s.clients) + s.closed.len()
 		closedClients = s.closed.closedClients()
+		c.Total = len(s.clients) + len(closedClients)
 	}
 
 	totalClients := c.Total
@@ -382,11 +383,9 @@ func (ci *ConnInfo) fill(client *client, nc net.Conn, now time.Time) {
 		ci.TLSCipher = tlsCipher(cs.CipherSuite)
 	}
 
-	switch conn := nc.(type) {
-	case *net.TCPConn, *tls.Conn:
-		addr := conn.RemoteAddr().(*net.TCPAddr)
-		ci.Port = addr.Port
-		ci.IP = addr.IP.String()
+	if client.port != 0 {
+		ci.Port = client.port
+		ci.IP = client.host
 	}
 }
 
@@ -394,8 +393,8 @@ func (ci *ConnInfo) fill(client *client, nc net.Conn, now time.Time) {
 func (c *client) getRTT() string {
 	if c.rtt == 0 {
 		// If a real client, go ahead and send ping now to get a value
-		// for RTT. For tests and telnet, etc skip.
-		if c.flags.isSet(connectReceived) && c.opts.Lang != "" {
+		// for RTT. For tests and telnet, or if client is closing, etc skip.
+		if !c.flags.isSet(clearConnection) && c.flags.isSet(connectReceived) && c.opts.Lang != "" {
 			c.sendPing()
 		}
 		return ""
@@ -671,6 +670,7 @@ type SubszOptions struct {
 	Test string `json:"test,omitempty"`
 }
 
+// SubDetail is for verbose information for subscriptions.
 type SubDetail struct {
 	Subject string `json:"subject"`
 	Queue   string `json:"qgroup,omitempty"`
@@ -710,14 +710,14 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 	}
 
 	// FIXME(dlc) - Make account aware.
-	sz := &Subsz{s.gsl.Stats(), 0, offset, limit, nil}
+	sz := &Subsz{s.gacc.sl.Stats(), 0, offset, limit, nil}
 
 	if subdetail {
 		// Now add in subscription's details
 		var raw [4096]*subscription
 		subs := raw[:0]
 
-		s.gsl.localSubs(&subs)
+		s.gacc.sl.localSubs(&subs)
 		details := make([]SubDetail, len(subs))
 		i := 0
 		// TODO(dlc) - may be inefficient and could just do normal match when total subs is large and filtering.
@@ -939,7 +939,7 @@ func (s *Server) Varz(varzOpts *VarzOptions) (*Varz, error) {
 	v.SlowConsumers = atomic.LoadInt64(&s.slowConsumers)
 	v.MaxPending = opts.MaxPending
 	v.WriteDeadline = opts.WriteDeadline
-	v.Subscriptions = s.gsl.Count()
+	v.Subscriptions = s.gacc.sl.Count()
 	v.ConfigLoadTime = s.configTime
 	// Need a copy here since s.httpReqStats can change while doing
 	// the marshaling down below.
@@ -1000,7 +1000,7 @@ func ResponseHandler(w http.ResponseWriter, r *http.Request, data []byte) {
 func (reason ClosedState) String() string {
 	switch reason {
 	case ClientClosed:
-		return "Client"
+		return "Client Closed"
 	case AuthenticationTimeout:
 		return "Authentication Timeout"
 	case AuthenticationViolation:
@@ -1027,16 +1027,24 @@ func (reason ClosedState) String() string {
 		return "Incorrect Port"
 	case MaxConnectionsExceeded:
 		return "Maximum Connections Exceeded"
+	case MaxAccountConnectionsExceeded:
+		return "Maximum Account Connections Exceeded"
 	case MaxPayloadExceeded:
 		return "Maximum Message Payload Exceeded"
 	case MaxControlLineExceeded:
 		return "Maximum Control Line Exceeded"
+	case MaxSubscriptionsExceeded:
+		return "Maximum Subscriptions Exceeded"
 	case DuplicateRoute:
 		return "Duplicate Route"
 	case RouteRemoved:
 		return "Route Removed"
 	case ServerShutdown:
 		return "Server Shutdown"
+	case AuthenticationExpired:
+		return "Authentication Expired"
+	case WrongGateway:
+		return "Wrong Gateway"
 	}
 	return "Unknown State"
 }

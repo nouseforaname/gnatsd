@@ -117,6 +117,19 @@ func TestTLSClientCertificate(t *testing.T) {
 	defer nc.Close()
 }
 
+func TestTLSClientCertificateHasUserID(t *testing.T) {
+	srv, opts := RunServerWithConfig("./configs/tls_cert_id.conf")
+	defer srv.Shutdown()
+	nurl := fmt.Sprintf("tls://%s:%d", opts.Host, opts.Port)
+	nc, err := nats.Connect(nurl,
+		nats.ClientCert("./configs/certs/client-id-auth-cert.pem", "./configs/certs/client-id-auth-key.pem"),
+		nats.RootCAs("./configs/certs/ca.pem"))
+	if err != nil {
+		t.Fatalf("Expected to connect, got %v", err)
+	}
+	defer nc.Close()
+}
+
 func TestTLSVerifyClientCertificate(t *testing.T) {
 	srv, opts := RunServerWithConfig("./configs/tlsverify_noca.conf")
 	defer srv.Shutdown()
@@ -282,8 +295,8 @@ func TestTLSBadAuthError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Expected error trying to connect to secure server")
 	}
-	if err.Error() != nats.ErrAuthorization.Error() {
-		t.Fatalf("Excpected and auth violation, got %v\n", err)
+	if strings.ToLower(err.Error()) != nats.ErrAuthorization.Error() {
+		t.Fatalf("Expected and auth violation, got %v\n", err)
 	}
 }
 
@@ -330,5 +343,84 @@ func TestTLSConnectionCurvePref(t *testing.T) {
 	nmsgs, _ := sub.QueuedMsgs()
 	if nmsgs != 1 {
 		t.Fatalf("Expected to receive a message over the TLS connection")
+	}
+}
+
+type captureSlowConsumerLogger struct {
+	dummyLogger
+	ch    chan string
+	gotIt bool
+}
+
+func (l *captureSlowConsumerLogger) Noticef(format string, v ...interface{}) {
+	msg := fmt.Sprintf(format, v...)
+	if strings.Contains(msg, "Slow Consumer") {
+		l.Lock()
+		if !l.gotIt {
+			l.gotIt = true
+			l.ch <- msg
+		}
+		l.Unlock()
+	}
+}
+
+func TestTLSTimeoutNotReportSlowConsumer(t *testing.T) {
+	oa, err := server.ProcessConfigFile("./configs/srv_a_tls.conf")
+	if err != nil {
+		t.Fatalf("Unable to load config file: %v", err)
+	}
+
+	// Override TLSTimeout to very small value so that handshake fails
+	oa.Cluster.TLSTimeout = 0.0000001
+	sa := RunServer(oa)
+	defer sa.Shutdown()
+
+	ch := make(chan string, 1)
+	cscl := &captureSlowConsumerLogger{ch: ch}
+	sa.SetLogger(cscl, false, false)
+
+	ob, err := server.ProcessConfigFile("./configs/srv_b_tls.conf")
+	if err != nil {
+		t.Fatalf("Unable to load config file: %v", err)
+	}
+
+	sb := RunServer(ob)
+	defer sb.Shutdown()
+
+	// Watch the logger for a bit and make sure we don't get any
+	// Slow Consumer error.
+	select {
+	case e := <-ch:
+		t.Fatalf("Unexpected slow consumer error: %s", e)
+	case <-time.After(500 * time.Millisecond):
+		// ok
+	}
+}
+
+func TestNotReportSlowConsumerUnlessConnected(t *testing.T) {
+	oa, err := server.ProcessConfigFile("./configs/srv_a_tls.conf")
+	if err != nil {
+		t.Fatalf("Unable to load config file: %v", err)
+	}
+
+	// Override WriteDeadline to very small value so that handshake
+	// fails with a slow consumer error.
+	oa.WriteDeadline = 1 * time.Nanosecond
+	sa := RunServer(oa)
+	defer sa.Shutdown()
+
+	ch := make(chan string, 1)
+	cscl := &captureSlowConsumerLogger{ch: ch}
+	sa.SetLogger(cscl, false, false)
+
+	nc := createClientConn(t, oa.Host, oa.Port)
+	defer nc.Close()
+
+	// Make sure we don't get any Slow Consumer error.
+	select {
+	case e := <-ch:
+		t.Fatalf("Unexpected slow consumer error: %s", e)
+	case <-time.After(500 * time.Millisecond):
+		// ok
 	}
 }

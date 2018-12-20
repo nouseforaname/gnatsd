@@ -26,16 +26,21 @@ const (
 	CommandQuit   = Command("quit")
 	CommandReopen = Command("reopen")
 	CommandReload = Command("reload")
+
+	// private for now
+	commandLDMode = Command("ldm")
 )
 
 var (
 	// gitCommit injected at build
 	gitCommit string
+	// trustedKeys is a whitespace separated array of trusted operator's public nkeys.
+	trustedKeys string
 )
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "1.3.1"
+	VERSION = "2.0.0-beta.12"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
@@ -116,15 +121,19 @@ const (
 	// MAX_PUB_ARGS Maximum possible number of arguments from PUB proto.
 	MAX_PUB_ARGS = 3
 
-	// DEFAULT_REMOTE_QSUBS_SWEEPER
+	// DEFAULT_REMOTE_QSUBS_SWEEPER is how often we sweep for orphans. Deprecated
 	DEFAULT_REMOTE_QSUBS_SWEEPER = 30 * time.Second
 
-	// DEFAULT_MAX_CLOSED_CLIENTS
+	// DEFAULT_MAX_CLOSED_CLIENTS is the maximum number of closed connections we hold onto.
 	DEFAULT_MAX_CLOSED_CLIENTS = 10000
 
-	// DEFAULT_MAX_ACCOUNT_AE_RESPONSE_MAPS
+	// DEFAULT_MAX_ACCOUNT_AE_RESPONSE_MAPS is for auto-expire response maps for imports.
 	DEFAULT_MAX_ACCOUNT_AE_RESPONSE_MAPS = 100000
 
-	// DEFAULT_TTL_AE_RESPONSE_MAP
+	// DEFAULT_TTL_AE_RESPONSE_MAP is the default time to expire auto-response map entries.
 	DEFAULT_TTL_AE_RESPONSE_MAP = 10 * time.Minute
+
+	// DEFAULT_LAME_DUCK_DURATION is the time in which the server spreads
+	// the closing of clients when signaled to go in lame duck mode.
+	DEFAULT_LAME_DUCK_DURATION = 2 * time.Minute
 )

@@ -30,11 +30,11 @@ func simpleAccountServer(t *testing.T) (*Server, *Account, *Account) {
 	s := New(&opts)
 
 	// Now create two accounts.
-	f, err := s.RegisterAccount("foo")
+	f, err := s.RegisterAccount("$foo")
 	if err != nil {
 		t.Fatalf("Error creating account 'foo': %v", err)
 	}
-	b, err := s.RegisterAccount("bar")
+	b, err := s.RegisterAccount("$bar")
 	if err != nil {
 		t.Fatalf("Error creating account 'bar': %v", err)
 	}
@@ -43,7 +43,7 @@ func simpleAccountServer(t *testing.T) (*Server, *Account, *Account) {
 
 func TestRegisterDuplicateAccounts(t *testing.T) {
 	s, _, _ := simpleAccountServer(t)
-	if _, err := s.RegisterAccount("foo"); err == nil {
+	if _, err := s.RegisterAccount("$foo"); err == nil {
 		t.Fatal("Expected an error registering 'foo' twice")
 	}
 }
@@ -102,18 +102,16 @@ func TestAccountIsolation(t *testing.T) {
 
 func TestAccountFromOptions(t *testing.T) {
 	opts := defaultServerOptions
-	opts.Accounts = []*Account{
-		&Account{Name: "foo"},
-		&Account{Name: "bar"},
-	}
+	opts.Accounts = []*Account{NewAccount("foo"), NewAccount("bar")}
 	s := New(&opts)
 
-	if la := len(s.accounts); la != 2 {
-		t.Fatalf("Expected to have a server with two accounts, got %v", la)
+	ta := s.numReservedAccounts() + 2
+	if la := len(s.accounts); la != ta {
+		t.Fatalf("Expected to have a server with %d total accounts, got %v", ta, la)
 	}
 	// Check that sl is filled in.
-	fooAcc := s.LookupAccount("foo")
-	barAcc := s.LookupAccount("bar")
+	fooAcc, _ := s.LookupAccount("foo")
+	barAcc, _ := s.LookupAccount("bar")
 	if fooAcc == nil || barAcc == nil {
 		t.Fatalf("Error retrieving accounts for 'foo' and 'bar'")
 	}
@@ -149,6 +147,91 @@ func TestNewAccountsFromClients(t *testing.T) {
 	}
 	if !strings.HasPrefix(l, "PONG\r\n") {
 		t.Fatalf("PONG response incorrect: %q", l)
+	}
+}
+
+func TestActiveAccounts(t *testing.T) {
+	opts := defaultServerOptions
+	opts.AllowNewAccounts = true
+	opts.Cluster.Port = 22
+
+	s := New(&opts)
+
+	if s.NumActiveAccounts() != 0 {
+		t.Fatalf("Expected no active accounts, got %d", s.NumActiveAccounts())
+	}
+
+	addClientWithAccount := func(accName string) *client {
+		t.Helper()
+		c, _, _ := newClientForServer(s)
+		connectOp := fmt.Sprintf("CONNECT {\"account\":\"%s\"}\r\n", accName)
+		err := c.parse([]byte(connectOp))
+		if err != nil {
+			t.Fatalf("Received an error trying to connect: %v", err)
+		}
+		return c
+	}
+
+	// Now add some clients.
+	cf1 := addClientWithAccount("foo")
+	if s.activeAccounts != 1 {
+		t.Fatalf("Expected active accounts to be 1, got %d", s.activeAccounts)
+	}
+	// Adding in same one should not change total.
+	cf2 := addClientWithAccount("foo")
+	if s.activeAccounts != 1 {
+		t.Fatalf("Expected active accounts to be 1, got %d", s.activeAccounts)
+	}
+	// Add in new one.
+	cb1 := addClientWithAccount("bar")
+	if s.activeAccounts != 2 {
+		t.Fatalf("Expected active accounts to be 2, got %d", s.activeAccounts)
+	}
+
+	// Make sure the Accounts track clients.
+	foo, _ := s.LookupAccount("foo")
+	bar, _ := s.LookupAccount("bar")
+	if foo == nil || bar == nil {
+		t.Fatalf("Error looking up accounts")
+	}
+	if nc := foo.NumConnections(); nc != 2 {
+		t.Fatalf("Expected account foo to have 2 clients, got %d", nc)
+	}
+	if nc := bar.NumConnections(); nc != 1 {
+		t.Fatalf("Expected account bar to have 1 client, got %d", nc)
+	}
+
+	waitTilActiveCount := func(n int) {
+		t.Helper()
+		checkFor(t, time.Second, 10*time.Millisecond, func() error {
+			if active := s.NumActiveAccounts(); active != n {
+				return fmt.Errorf("Number of active accounts is %d", active)
+			}
+			return nil
+		})
+	}
+
+	// Test Removal
+	cb1.closeConnection(ClientClosed)
+	waitTilActiveCount(1)
+
+	if nc := bar.NumConnections(); nc != 0 {
+		t.Fatalf("Expected account bar to have 0 clients, got %d", nc)
+	}
+
+	// This should not change the count.
+	cf1.closeConnection(ClientClosed)
+	waitTilActiveCount(1)
+
+	if nc := foo.NumConnections(); nc != 1 {
+		t.Fatalf("Expected account foo to have 1 client, got %d", nc)
+	}
+
+	cf2.closeConnection(ClientClosed)
+	waitTilActiveCount(0)
+
+	if nc := foo.NumConnections(); nc != 0 {
+		t.Fatalf("Expected account bar to have 0 clients, got %d", nc)
 	}
 }
 
@@ -441,60 +524,60 @@ func TestImportExportConfigFailures(t *testing.T) {
 func TestImportAuthorized(t *testing.T) {
 	_, foo, bar := simpleAccountServer(t)
 
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo"), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "*"), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, ">"), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.*"), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.>"), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "*", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, ">", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.*", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.>", nil), false, t)
 
-	foo.addStreamExport("foo", isPublicExport)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "bar"), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "*"), false, t)
+	foo.AddStreamExport("foo", IsPublicExport)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "bar", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "*", nil), false, t)
 
-	foo.addStreamExport("*", []*Account{bar})
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "bar"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "baz"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar"), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, ">"), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "*"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.*"), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "*.*"), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "*.>"), false, t)
+	foo.AddStreamExport("*", []*Account{bar})
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "bar", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "baz", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, ">", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "*", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.*", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "*.*", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "*.>", nil), false, t)
 
 	// Reset and test '>' public export
 	_, foo, bar = simpleAccountServer(t)
-	foo.addStreamExport(">", nil)
+	foo.AddStreamExport(">", nil)
 	// Everything should work.
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "bar"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "baz"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, ">"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "*"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.*"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "*.*"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "*.>"), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "bar", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "baz", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, ">", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "*", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.*", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "*.*", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "*.>", nil), true, t)
 
 	// Reset and test pwc and fwc
 	s, foo, bar := simpleAccountServer(t)
-	foo.addStreamExport("foo.*.baz.>", []*Account{bar})
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar.baz.1"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar.baz.*"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.*.baz.1.1"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.22.baz.22"), true, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar.baz"), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, ""), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar.*.*"), false, t)
+	foo.AddStreamExport("foo.*.baz.>", []*Account{bar})
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar.baz.1", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar.baz.*", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.*.baz.1.1", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.22.baz.22", nil), true, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar.baz", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bar, "foo.bar.*.*", nil), false, t)
 
 	// Make sure we match the account as well
 
 	fb, _ := s.RegisterAccount("foobar")
 	bz, _ := s.RegisterAccount("baz")
 
-	checkBool(foo.checkStreamImportAuthorized(fb, "foo.bar.baz.1"), false, t)
-	checkBool(foo.checkStreamImportAuthorized(bz, "foo.bar.baz.1"), false, t)
+	checkBool(foo.checkStreamImportAuthorized(fb, "foo.bar.baz.1", nil), false, t)
+	checkBool(foo.checkStreamImportAuthorized(bz, "foo.bar.baz.1", nil), false, t)
 }
 
 func TestSimpleMapping(t *testing.T) {
@@ -515,23 +598,21 @@ func TestSimpleMapping(t *testing.T) {
 	}
 
 	// Test first that trying to import with no matching export permission returns an error.
-	if err := cbar.acc.addStreamImport(fooAcc, "foo", "import"); err != ErrStreamImportAuthorization {
+	if err := cbar.acc.AddStreamImport(fooAcc, "foo", "import"); err != ErrStreamImportAuthorization {
 		t.Fatalf("Expected error of ErrAccountImportAuthorization but got %v", err)
 	}
 
 	// Now map the subject space between foo and bar.
 	// Need to do export first.
-	if err := cfoo.acc.addStreamExport("foo", nil); err != nil { // Public with no accounts defined.
+	if err := cfoo.acc.AddStreamExport("foo", nil); err != nil { // Public with no accounts defined.
 		t.Fatalf("Error adding account export to client foo: %v", err)
 	}
-	if err := cbar.acc.addStreamImport(fooAcc, "foo", "import"); err != nil {
+	if err := cbar.acc.AddStreamImport(fooAcc, "foo", "import"); err != nil {
 		t.Fatalf("Error adding account import to client bar: %v", err)
 	}
 
-	// Normal Subscription on bar client.
-	go cbar.parse([]byte("SUB import.foo 1\r\nSUB import.foo bar 2\r\nPING\r\n"))
-	_, err := crBar.ReadString('\n') // Make sure subscriptions were processed.
-	if err != nil {
+	// Normal and Queue Subscription on bar client.
+	if err := cbar.parse([]byte("SUB import.foo 1\r\nSUB import.foo bar 2\r\n")); err != nil {
 		t.Fatalf("Error for client 'bar' from server: %v", err)
 	}
 
@@ -567,6 +648,29 @@ func TestSimpleMapping(t *testing.T) {
 	}
 	checkMsg(l, "2")
 	checkPayload(crBar, []byte("hello\r\n"), t)
+
+	// We should have 2 subscriptions in both. Normal and Queue Subscriber
+	// for barAcc which are local, and 2 that are shadowed in fooAcc.
+	// Now make sure that when we unsubscribe we clean up properly for both.
+	if bslc := barAcc.sl.Count(); bslc != 2 {
+		t.Fatalf("Expected 2 normal subscriptions on barAcc, got %d", bslc)
+	}
+	if fslc := fooAcc.sl.Count(); fslc != 2 {
+		t.Fatalf("Expected 2 shadowed subscriptions on fooAcc, got %d", fslc)
+	}
+
+	// Now unsubscribe.
+	if err := cbar.parse([]byte("UNSUB 1\r\nUNSUB 2\r\n")); err != nil {
+		t.Fatalf("Error for client 'bar' from server: %v", err)
+	}
+
+	// We should have zero on both.
+	if bslc := barAcc.sl.Count(); bslc != 0 {
+		t.Fatalf("Expected no normal subscriptions on barAcc, got %d", bslc)
+	}
+	if fslc := fooAcc.sl.Count(); fslc != 0 {
+		t.Fatalf("Expected no shadowed subscriptions on fooAcc, got %d", fslc)
+	}
 }
 
 func TestNoPrefixWildcardMapping(t *testing.T) {
@@ -586,10 +690,10 @@ func TestNoPrefixWildcardMapping(t *testing.T) {
 		t.Fatalf("Error registering client with 'bar' account: %v", err)
 	}
 
-	if err := cfoo.acc.addStreamExport(">", []*Account{barAcc}); err != nil {
+	if err := cfoo.acc.AddStreamExport(">", []*Account{barAcc}); err != nil {
 		t.Fatalf("Error adding stream export to client foo: %v", err)
 	}
-	if err := cbar.acc.addStreamImport(fooAcc, "*", ""); err != nil {
+	if err := cbar.acc.AddStreamImport(fooAcc, "*", ""); err != nil {
 		t.Fatalf("Error adding stream import to client bar: %v", err)
 	}
 
@@ -639,11 +743,11 @@ func TestPrefixWildcardMapping(t *testing.T) {
 		t.Fatalf("Error registering client with 'bar' account: %v", err)
 	}
 
-	if err := cfoo.acc.addStreamExport(">", []*Account{barAcc}); err != nil {
+	if err := cfoo.acc.AddStreamExport(">", []*Account{barAcc}); err != nil {
 		t.Fatalf("Error adding stream export to client foo: %v", err)
 	}
 	// Checking that trailing '.' is accepted, tested that it is auto added above.
-	if err := cbar.acc.addStreamImport(fooAcc, "*", "pub.imports."); err != nil {
+	if err := cbar.acc.AddStreamImport(fooAcc, "*", "pub.imports."); err != nil {
 		t.Fatalf("Error adding stream import to client bar: %v", err)
 	}
 
@@ -693,10 +797,10 @@ func TestPrefixWildcardMappingWithLiteralSub(t *testing.T) {
 		t.Fatalf("Error registering client with 'bar' account: %v", err)
 	}
 
-	if err := cfoo.acc.addStreamExport(">", []*Account{barAcc}); err != nil {
+	if err := fooAcc.AddStreamExport(">", []*Account{barAcc}); err != nil {
 		t.Fatalf("Error adding stream export to client foo: %v", err)
 	}
-	if err := cbar.acc.addStreamImport(fooAcc, "*", "pub.imports."); err != nil {
+	if err := barAcc.AddStreamImport(fooAcc, "*", "pub.imports."); err != nil {
 		t.Fatalf("Error adding stream import to client bar: %v", err)
 	}
 
@@ -729,6 +833,282 @@ func TestPrefixWildcardMappingWithLiteralSub(t *testing.T) {
 	checkPayload(crBar, []byte("hello\r\n"), t)
 }
 
+func TestMultipleImportsAndSingleWCSub(t *testing.T) {
+	s, fooAcc, barAcc := simpleAccountServer(t)
+	defer s.Shutdown()
+
+	cfoo, _, _ := newClientForServer(s)
+	defer cfoo.nc.Close()
+
+	if err := cfoo.registerWithAccount(fooAcc); err != nil {
+		t.Fatalf("Error registering client with 'foo' account: %v", err)
+	}
+	cbar, crBar, _ := newClientForServer(s)
+	defer cbar.nc.Close()
+
+	if err := cbar.registerWithAccount(barAcc); err != nil {
+		t.Fatalf("Error registering client with 'bar' account: %v", err)
+	}
+
+	if err := fooAcc.AddStreamExport("foo", []*Account{barAcc}); err != nil {
+		t.Fatalf("Error adding stream export to account foo: %v", err)
+	}
+	if err := fooAcc.AddStreamExport("bar", []*Account{barAcc}); err != nil {
+		t.Fatalf("Error adding stream export to account foo: %v", err)
+	}
+
+	if err := barAcc.AddStreamImport(fooAcc, "foo", "pub."); err != nil {
+		t.Fatalf("Error adding stream import to account bar: %v", err)
+	}
+	if err := barAcc.AddStreamImport(fooAcc, "bar", "pub."); err != nil {
+		t.Fatalf("Error adding stream import to account bar: %v", err)
+	}
+
+	// Wildcard Subscription on bar client for both imports.
+	cbar.parse([]byte("SUB pub.* 1\r\n"))
+
+	// Now publish a message on 'foo' and 'bar'
+	go cfoo.parseAndFlush([]byte("PUB foo 5\r\nhello\r\nPUB bar 5\r\nworld\r\n"))
+
+	// Now check we got the messages from the wildcard subscription.
+	l, err := crBar.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Error reading from client 'bar': %v", err)
+	}
+	mraw := msgPat.FindAllStringSubmatch(l, -1)
+	if len(mraw) == 0 {
+		t.Fatalf("No message received")
+	}
+	matches := mraw[0]
+	if matches[SUB_INDEX] != "pub.foo" {
+		t.Fatalf("Did not get correct subject: '%s'", matches[SUB_INDEX])
+	}
+	if matches[SID_INDEX] != "1" {
+		t.Fatalf("Did not get correct sid: '%s'", matches[SID_INDEX])
+	}
+	checkPayload(crBar, []byte("hello\r\n"), t)
+
+	l, err = crBar.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Error reading from client 'bar': %v", err)
+	}
+	mraw = msgPat.FindAllStringSubmatch(l, -1)
+	if len(mraw) == 0 {
+		t.Fatalf("No message received")
+	}
+	matches = mraw[0]
+	if matches[SUB_INDEX] != "pub.bar" {
+		t.Fatalf("Did not get correct subject: '%s'", matches[SUB_INDEX])
+	}
+	if matches[SID_INDEX] != "1" {
+		t.Fatalf("Did not get correct sid: '%s'", matches[SID_INDEX])
+	}
+	checkPayload(crBar, []byte("world\r\n"), t)
+
+	// Check subscription count.
+	if fslc := fooAcc.sl.Count(); fslc != 2 {
+		t.Fatalf("Expected 2 shadowed subscriptions on fooAcc, got %d", fslc)
+	}
+	if bslc := barAcc.sl.Count(); bslc != 1 {
+		t.Fatalf("Expected 1 normal subscriptions on barAcc, got %d", bslc)
+	}
+
+	// Now unsubscribe.
+	if err := cbar.parse([]byte("UNSUB 1\r\n")); err != nil {
+		t.Fatalf("Error for client 'bar' from server: %v", err)
+	}
+	// We should have zero on both.
+	if bslc := barAcc.sl.Count(); bslc != 0 {
+		t.Fatalf("Expected no normal subscriptions on barAcc, got %d", bslc)
+	}
+	if fslc := fooAcc.sl.Count(); fslc != 0 {
+		t.Fatalf("Expected no shadowed subscriptions on fooAcc, got %d", fslc)
+	}
+}
+
+// Make sure the AddServiceExport function is additive if called multiple times.
+func TestAddServiceExport(t *testing.T) {
+	s, fooAcc, barAcc := simpleAccountServer(t)
+	bazAcc, err := s.RegisterAccount("$baz")
+	if err != nil {
+		t.Fatalf("Error creating account 'baz': %v", err)
+	}
+	defer s.Shutdown()
+
+	if err := fooAcc.AddServiceExport("test.request", nil); err != nil {
+		t.Fatalf("Error adding account service export to client foo: %v", err)
+	}
+	tr := fooAcc.exports.services["test.request"]
+	if tr != nil {
+		t.Fatalf("Expected no authorized accounts, got %d", len(tr.approved))
+	}
+	if err := fooAcc.AddServiceExport("test.request", []*Account{barAcc}); err != nil {
+		t.Fatalf("Error adding account service export to client foo: %v", err)
+	}
+	tr = fooAcc.exports.services["test.request"]
+	if tr == nil {
+		t.Fatalf("Expected authorized accounts, got nil")
+	}
+	if ls := len(tr.approved); ls != 1 {
+		t.Fatalf("Expected 1 authorized accounts, got %d", ls)
+	}
+	if err := fooAcc.AddServiceExport("test.request", []*Account{bazAcc}); err != nil {
+		t.Fatalf("Error adding account service export to client foo: %v", err)
+	}
+	tr = fooAcc.exports.services["test.request"]
+	if tr == nil {
+		t.Fatalf("Expected authorized accounts, got nil")
+	}
+	if ls := len(tr.approved); ls != 2 {
+		t.Fatalf("Expected 2 authorized accounts, got %d", ls)
+	}
+}
+
+func TestServiceExportWithWildcards(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		public bool
+	}{
+		{
+			name:   "public",
+			public: true,
+		},
+		{
+			name:   "private",
+			public: false,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, fooAcc, barAcc := simpleAccountServer(t)
+			defer s.Shutdown()
+
+			var accs []*Account
+			if !test.public {
+				accs = []*Account{barAcc}
+			}
+			// Add service export with a wildcard
+			if err := fooAcc.AddServiceExport("ngs.update.*", accs); err != nil {
+				t.Fatalf("Error adding account service export: %v", err)
+			}
+			// Import on bar account
+			if err := barAcc.AddServiceImport(fooAcc, "ngs.update", "ngs.update.$bar"); err != nil {
+				t.Fatalf("Error adding account service import: %v", err)
+			}
+
+			cfoo, crFoo, _ := newClientForServer(s)
+			defer cfoo.nc.Close()
+
+			if err := cfoo.registerWithAccount(fooAcc); err != nil {
+				t.Fatalf("Error registering client with 'foo' account: %v", err)
+			}
+			cbar, crBar, _ := newClientForServer(s)
+			defer cbar.nc.Close()
+
+			if err := cbar.registerWithAccount(barAcc); err != nil {
+				t.Fatalf("Error registering client with 'bar' account: %v", err)
+			}
+
+			// Now setup the resonder under cfoo
+			cfoo.parse([]byte("SUB ngs.update.* 1\r\n"))
+
+			// Now send the request. Remember we expect the request on our local ngs.update.
+			// We added the route with that "from" and will map it to "ngs.update.$bar"
+			go cbar.parseAndFlush([]byte("SUB reply 11\r\nPUB ngs.update reply 4\r\nhelp\r\n"))
+
+			// Now read the request from crFoo
+			l, err := crFoo.ReadString('\n')
+			if err != nil {
+				t.Fatalf("Error reading from client 'bar': %v", err)
+			}
+
+			mraw := msgPat.FindAllStringSubmatch(l, -1)
+			if len(mraw) == 0 {
+				t.Fatalf("No message received")
+			}
+			matches := mraw[0]
+			if matches[SUB_INDEX] != "ngs.update.$bar" {
+				t.Fatalf("Did not get correct subject: '%s'", matches[SUB_INDEX])
+			}
+			if matches[SID_INDEX] != "1" {
+				t.Fatalf("Did not get correct sid: '%s'", matches[SID_INDEX])
+			}
+			// Make sure this looks like _INBOX
+			if !strings.HasPrefix(matches[REPLY_INDEX], "_R_.") {
+				t.Fatalf("Expected an _R_.* like reply, got '%s'", matches[REPLY_INDEX])
+			}
+			checkPayload(crFoo, []byte("help\r\n"), t)
+
+			replyOp := fmt.Sprintf("PUB %s 2\r\n22\r\n", matches[REPLY_INDEX])
+			go cfoo.parseAndFlush([]byte(replyOp))
+
+			// Now read the response from crBar
+			l, err = crBar.ReadString('\n')
+			if err != nil {
+				t.Fatalf("Error reading from client 'bar': %v", err)
+			}
+			mraw = msgPat.FindAllStringSubmatch(l, -1)
+			if len(mraw) == 0 {
+				t.Fatalf("No message received")
+			}
+			matches = mraw[0]
+			if matches[SUB_INDEX] != "reply" {
+				t.Fatalf("Did not get correct subject: '%s'", matches[SUB_INDEX])
+			}
+			if matches[SID_INDEX] != "11" {
+				t.Fatalf("Did not get correct sid: '%s'", matches[SID_INDEX])
+			}
+			if matches[REPLY_INDEX] != "" {
+				t.Fatalf("Did not get correct sid: '%s'", matches[SID_INDEX])
+			}
+			checkPayload(crBar, []byte("22\r\n"), t)
+
+			// Make sure we have no service imports on fooAcc. An implicit one was created
+			// for the response but should be removed when the response was processed.
+			if nr := fooAcc.numServiceRoutes(); nr != 0 {
+				t.Fatalf("Expected no remaining routes on fooAcc, got %d", nr)
+			}
+		})
+	}
+}
+
+// Make sure the AddStreamExport function is additive if called multiple times.
+func TestAddStreamExport(t *testing.T) {
+	s, fooAcc, barAcc := simpleAccountServer(t)
+	bazAcc, err := s.RegisterAccount("$baz")
+	if err != nil {
+		t.Fatalf("Error creating account 'baz': %v", err)
+	}
+	defer s.Shutdown()
+
+	if err := fooAcc.AddStreamExport("test.request", nil); err != nil {
+		t.Fatalf("Error adding account service export to client foo: %v", err)
+	}
+	tr := fooAcc.exports.streams["test.request"]
+	if tr != nil {
+		t.Fatalf("Expected no authorized accounts, got %d", len(tr.approved))
+	}
+	if err := fooAcc.AddStreamExport("test.request", []*Account{barAcc}); err != nil {
+		t.Fatalf("Error adding account service export to client foo: %v", err)
+	}
+	tr = fooAcc.exports.streams["test.request"]
+	if tr == nil {
+		t.Fatalf("Expected authorized accounts, got nil")
+	}
+	if ls := len(tr.approved); ls != 1 {
+		t.Fatalf("Expected 1 authorized accounts, got %d", ls)
+	}
+	if err := fooAcc.AddStreamExport("test.request", []*Account{bazAcc}); err != nil {
+		t.Fatalf("Error adding account service export to client foo: %v", err)
+	}
+	tr = fooAcc.exports.streams["test.request"]
+	if tr == nil {
+		t.Fatalf("Expected authorized accounts, got nil")
+	}
+	if ls := len(tr.approved); ls != 2 {
+		t.Fatalf("Expected 2 authorized accounts, got %d", ls)
+	}
+}
+
 func TestCrossAccountRequestReply(t *testing.T) {
 	s, fooAcc, barAcc := simpleAccountServer(t)
 	defer s.Shutdown()
@@ -747,23 +1127,23 @@ func TestCrossAccountRequestReply(t *testing.T) {
 	}
 
 	// Add in the service export for the requests. Make it public.
-	if err := cfoo.acc.addServiceExport("test.request", nil); err != nil {
+	if err := cfoo.acc.AddServiceExport("test.request", nil); err != nil {
 		t.Fatalf("Error adding account service export to client foo: %v", err)
 	}
 
 	// Test addServiceImport to make sure it requires accounts, and literalsubjects for both from and to subjects.
-	if err := cbar.acc.addServiceImport(nil, "foo", "test.request"); err != ErrMissingAccount {
+	if err := cbar.acc.AddServiceImport(nil, "foo", "test.request"); err != ErrMissingAccount {
 		t.Fatalf("Expected ErrMissingAccount but received %v.", err)
 	}
-	if err := cbar.acc.addServiceImport(fooAcc, "*", "test.request"); err != ErrInvalidSubject {
+	if err := cbar.acc.AddServiceImport(fooAcc, "*", "test.request"); err != ErrInvalidSubject {
 		t.Fatalf("Expected ErrInvalidSubject but received %v.", err)
 	}
-	if err := cbar.acc.addServiceImport(fooAcc, "foo", "test..request."); err != ErrInvalidSubject {
+	if err := cbar.acc.AddServiceImport(fooAcc, "foo", "test..request."); err != ErrInvalidSubject {
 		t.Fatalf("Expected ErrInvalidSubject but received %v.", err)
 	}
 
 	// Now add in the Route for request to be routed to the foo account.
-	if err := cbar.acc.addServiceImport(fooAcc, "foo", "test.request"); err != nil {
+	if err := cbar.acc.AddServiceImport(fooAcc, "foo", "test.request"); err != nil {
 		t.Fatalf("Error adding account service import to client bar: %v", err)
 	}
 
@@ -792,8 +1172,8 @@ func TestCrossAccountRequestReply(t *testing.T) {
 		t.Fatalf("Did not get correct sid: '%s'", matches[SID_INDEX])
 	}
 	// Make sure this looks like _INBOX
-	if !strings.HasPrefix(matches[REPLY_INDEX], "_INBOX.") {
-		t.Fatalf("Expected an _INBOX.* like reply, got '%s'", matches[REPLY_INDEX])
+	if !strings.HasPrefix(matches[REPLY_INDEX], "_R_.") {
+		t.Fatalf("Expected an _R_.* like reply, got '%s'", matches[REPLY_INDEX])
 	}
 	checkPayload(crFoo, []byte("help\r\n"), t)
 
@@ -832,9 +1212,18 @@ func TestCrossAccountRequestReplyResponseMaps(t *testing.T) {
 	s, fooAcc, barAcc := simpleAccountServer(t)
 	defer s.Shutdown()
 
+	// Make sure they have the correct defaults
+	if max := barAcc.MaxAutoExpireResponseMaps(); max != DEFAULT_MAX_ACCOUNT_AE_RESPONSE_MAPS {
+		t.Fatalf("Expected %d for max default, but got %d", DEFAULT_MAX_ACCOUNT_AE_RESPONSE_MAPS, max)
+	}
+
+	if ttl := barAcc.AutoExpireTTL(); ttl != DEFAULT_TTL_AE_RESPONSE_MAP {
+		t.Fatalf("Expected %v for the ttl default, got %v", DEFAULT_TTL_AE_RESPONSE_MAP, ttl)
+	}
+
 	ttl := 500 * time.Millisecond
-	barAcc.setMaxAutoExpireResponseMaps(5)
-	barAcc.setMaxAutoExpireTTL(ttl)
+	barAcc.SetMaxAutoExpireResponseMaps(5)
+	barAcc.SetAutoExpireTTL(ttl)
 	cfoo, _, _ := newClientForServer(s)
 	defer cfoo.nc.Close()
 
@@ -842,10 +1231,10 @@ func TestCrossAccountRequestReplyResponseMaps(t *testing.T) {
 		t.Fatalf("Error registering client with 'foo' account: %v", err)
 	}
 
-	if err := barAcc.addServiceExport("test.request", nil); err != nil {
+	if err := barAcc.AddServiceExport("test.request", nil); err != nil {
 		t.Fatalf("Error adding account service export: %v", err)
 	}
-	if err := fooAcc.addServiceImport(barAcc, "foo", "test.request"); err != nil {
+	if err := fooAcc.AddServiceImport(barAcc, "foo", "test.request"); err != nil {
 		t.Fatalf("Error adding account service import: %v", err)
 	}
 
@@ -853,7 +1242,7 @@ func TestCrossAccountRequestReplyResponseMaps(t *testing.T) {
 		cfoo.parseAndFlush([]byte("PUB foo bar 4\r\nhelp\r\n"))
 	}
 
-	// We should expire because max.
+	// We should expire because of max.
 	checkFor(t, time.Second, 10*time.Millisecond, func() error {
 		if nae := barAcc.numAutoExpireResponseMaps(); nae != 5 {
 			return fmt.Errorf("Number of responsemaps is %d", nae)
@@ -864,7 +1253,7 @@ func TestCrossAccountRequestReplyResponseMaps(t *testing.T) {
 	// Wait for the ttl to expire.
 	time.Sleep(2 * ttl)
 
-	// Now run prune and make sure we collect the timedout ones.
+	// Now run prune and make sure we collect the timed-out ones.
 	barAcc.pruneAutoExpireResponseMaps()
 
 	// We should expire because ttl.
@@ -903,8 +1292,8 @@ func TestAccountMapsUsers(t *testing.T) {
 		t.Fatalf("Unexpected error parsing config file: %v", err)
 	}
 	s := New(opts)
-	synadia := s.LookupAccount("synadia")
-	nats := s.LookupAccount("nats")
+	synadia, _ := s.LookupAccount("synadia")
+	nats, _ := s.LookupAccount("nats")
 
 	if synadia == nil || nats == nil {
 		t.Fatalf("Expected non nil accounts during lookup")
@@ -917,10 +1306,6 @@ func TestAccountMapsUsers(t *testing.T) {
 	if c.acc != synadia {
 		t.Fatalf("Expected the client's account to match 'synadia', got %v", c.acc)
 	}
-	// Also test client sublist.
-	if c.sl != synadia.sl {
-		t.Fatalf("Expected the client's sublist to match 'synadia' account")
-	}
 
 	c, _, _ = newClientForServer(s)
 	connectOp = []byte("CONNECT {\"user\":\"ivan\",\"pass\":\"bar\"}\r\n")
@@ -928,13 +1313,9 @@ func TestAccountMapsUsers(t *testing.T) {
 	if c.acc != nats {
 		t.Fatalf("Expected the client's account to match 'nats', got %v", c.acc)
 	}
-	// Also test client sublist.
-	if c.sl != nats.sl {
-		t.Fatalf("Expected the client's sublist to match 'nats' account")
-	}
 
 	// Now test nkeys as well.
-	kp, _ := nkeys.FromSeed(seed1)
+	kp, _ := nkeys.FromSeed([]byte(seed1))
 	pubKey, _ := kp.PublicKey()
 
 	c, cr, l := newClientForServer(s)
@@ -951,7 +1332,7 @@ func TestAccountMapsUsers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed signing nonce: %v", err)
 	}
-	sig := base64.StdEncoding.EncodeToString(sigraw)
+	sig := base64.RawURLEncoding.EncodeToString(sigraw)
 
 	// PING needed to flush the +OK to us.
 	cs := fmt.Sprintf("CONNECT {\"nkey\":%q,\"sig\":\"%s\",\"verbose\":true,\"pedantic\":true}\r\nPING\r\n", pubKey, sig)
@@ -963,13 +1344,9 @@ func TestAccountMapsUsers(t *testing.T) {
 	if c.acc != synadia {
 		t.Fatalf("Expected the nkey client's account to match 'synadia', got %v", c.acc)
 	}
-	// Also test client sublist.
-	if c.sl != synadia.sl {
-		t.Fatalf("Expected the client's sublist to match 'synadia' account")
-	}
 
 	// Now nats account nkey user.
-	kp, _ = nkeys.FromSeed(seed2)
+	kp, _ = nkeys.FromSeed([]byte(seed2))
 	pubKey, _ = kp.PublicKey()
 
 	c, cr, l = newClientForServer(s)
@@ -985,7 +1362,7 @@ func TestAccountMapsUsers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed signing nonce: %v", err)
 	}
-	sig = base64.StdEncoding.EncodeToString(sigraw)
+	sig = base64.RawURLEncoding.EncodeToString(sigraw)
 
 	// PING needed to flush the +OK to us.
 	cs = fmt.Sprintf("CONNECT {\"nkey\":%q,\"sig\":\"%s\",\"verbose\":true,\"pedantic\":true}\r\nPING\r\n", pubKey, sig)
@@ -997,9 +1374,122 @@ func TestAccountMapsUsers(t *testing.T) {
 	if c.acc != nats {
 		t.Fatalf("Expected the nkey client's account to match 'nats', got %v", c.acc)
 	}
-	// Also test client sublist.
-	if c.sl != nats.sl {
-		t.Fatalf("Expected the client's sublist to match 'nats' account")
+}
+
+func TestAccountGlobalDefault(t *testing.T) {
+	opts := defaultServerOptions
+	s := New(&opts)
+
+	if acc, _ := s.LookupAccount(globalAccountName); acc == nil {
+		t.Fatalf("Expected a global default account on a new server, got none.")
+	}
+	// Make sure we can not create one with same name..
+	if _, err := s.RegisterAccount(globalAccountName); err == nil {
+		t.Fatalf("Expected error trying to create a new reserved account")
+	}
+
+	// Make sure we can not define one in a config file either.
+	confFileName := createConfFile(t, []byte(`accounts { $G {} }`))
+	defer os.Remove(confFileName)
+
+	if _, err := ProcessConfigFile(confFileName); err == nil {
+		t.Fatalf("Expected an error parsing config file with reserved account")
+	}
+}
+
+func TestAccountCheckStreamImportsEqual(t *testing.T) {
+	// Create bare accounts for this test
+	fooAcc := NewAccount("foo")
+	if err := fooAcc.AddStreamExport(">", nil); err != nil {
+		t.Fatalf("Error adding stream export: %v", err)
+	}
+
+	barAcc := NewAccount("bar")
+	if err := barAcc.AddStreamImport(fooAcc, "foo", "myPrefix"); err != nil {
+		t.Fatalf("Error adding stream import: %v", err)
+	}
+	bazAcc := NewAccount("baz")
+	if err := bazAcc.AddStreamImport(fooAcc, "foo", "myPrefix"); err != nil {
+		t.Fatalf("Error adding stream import: %v", err)
+	}
+	if !barAcc.checkStreamImportsEqual(bazAcc) {
+		t.Fatal("Expected stream imports to be the same")
+	}
+
+	if err := bazAcc.AddStreamImport(fooAcc, "foo.>", ""); err != nil {
+		t.Fatalf("Error adding stream import: %v", err)
+	}
+	if barAcc.checkStreamImportsEqual(bazAcc) {
+		t.Fatal("Expected stream imports to be different")
+	}
+	if err := barAcc.AddStreamImport(fooAcc, "foo.>", ""); err != nil {
+		t.Fatalf("Error adding stream import: %v", err)
+	}
+	if !barAcc.checkStreamImportsEqual(bazAcc) {
+		t.Fatal("Expected stream imports to be the same")
+	}
+
+	// Create another account that is named "foo". We want to make sure
+	// that the comparison still works (based on account name, not pointer)
+	newFooAcc := NewAccount("foo")
+	if err := newFooAcc.AddStreamExport(">", nil); err != nil {
+		t.Fatalf("Error adding stream export: %v", err)
+	}
+	batAcc := NewAccount("bat")
+	if err := batAcc.AddStreamImport(newFooAcc, "foo", "myPrefix"); err != nil {
+		t.Fatalf("Error adding stream import: %v", err)
+	}
+	if err := batAcc.AddStreamImport(newFooAcc, "foo.>", ""); err != nil {
+		t.Fatalf("Error adding stream import: %v", err)
+	}
+	if !batAcc.checkStreamImportsEqual(barAcc) {
+		t.Fatal("Expected stream imports to be the same")
+	}
+	if !batAcc.checkStreamImportsEqual(bazAcc) {
+		t.Fatal("Expected stream imports to be the same")
+	}
+
+	// Test with account with different "from"
+	expAcc := NewAccount("new_acc")
+	if err := expAcc.AddStreamExport(">", nil); err != nil {
+		t.Fatalf("Error adding stream export: %v", err)
+	}
+	aAcc := NewAccount("a")
+	if err := aAcc.AddStreamImport(expAcc, "bar", ""); err != nil {
+		t.Fatalf("Error adding stream import: %v", err)
+	}
+	bAcc := NewAccount("b")
+	if err := bAcc.AddStreamImport(expAcc, "baz", ""); err != nil {
+		t.Fatalf("Error adding stream import: %v", err)
+	}
+	if aAcc.checkStreamImportsEqual(bAcc) {
+		t.Fatal("Expected stream imports to be different")
+	}
+
+	// Test with account with different "prefix"
+	aAcc = NewAccount("a")
+	if err := aAcc.AddStreamImport(expAcc, "bar", "prefix"); err != nil {
+		t.Fatalf("Error adding stream import: %v", err)
+	}
+	bAcc = NewAccount("b")
+	if err := bAcc.AddStreamImport(expAcc, "bar", "diff_prefix"); err != nil {
+		t.Fatalf("Error adding stream import: %v", err)
+	}
+	if aAcc.checkStreamImportsEqual(bAcc) {
+		t.Fatal("Expected stream imports to be different")
+	}
+
+	// Test with account with different "name"
+	expAcc = NewAccount("diff_name")
+	if err := expAcc.AddStreamExport(">", nil); err != nil {
+		t.Fatalf("Error adding stream export: %v", err)
+	}
+	bAcc = NewAccount("b")
+	if err := bAcc.AddStreamImport(expAcc, "bar", "prefix"); err != nil {
+		t.Fatalf("Error adding stream import: %v", err)
+	}
+	if aAcc.checkStreamImportsEqual(bAcc) {
+		t.Fatal("Expected stream imports to be different")
 	}
 }
 

@@ -229,11 +229,28 @@ func (a *authTimeoutOption) Apply(server *Server) {
 // setting.
 type usersOption struct {
 	authOption
-	newValue []*User
 }
 
 func (u *usersOption) Apply(server *Server) {
 	server.Noticef("Reloaded: authorization users")
+}
+
+// nkeysOption implements the option interface for the authorization `users`
+// setting.
+type nkeysOption struct {
+	authOption
+}
+
+func (u *nkeysOption) Apply(server *Server) {
+	server.Noticef("Reloaded: authorization nkey users")
+}
+
+type trustKeysOption struct {
+	noopOption
+}
+
+func (u *trustKeysOption) Apply(server *Server) {
+	server.Noticef("Reloaded: trusted keys")
 }
 
 // clusterOption implements the option interface for the `cluster` setting.
@@ -295,7 +312,7 @@ func (r *routesOption) Apply(server *Server) {
 			client.mu.Unlock()
 			if url != nil && urlsAreEqual(url, remove) {
 				// Do not attempt to reconnect when route is removed.
-				client.setRouteNoReconnectOnClose()
+				client.setNoReconnect()
 				client.closeConnection(RouteRemoved)
 				server.Noticef("Removed route %v", remove)
 			}
@@ -403,7 +420,7 @@ func (m *maxPayloadOption) Apply(server *Server) {
 	server.mu.Lock()
 	server.info.MaxPayload = m.newValue
 	for _, client := range server.clients {
-		atomic.StoreInt64(&client.mpay, int64(m.newValue))
+		atomic.StoreInt32(&client.mpay, int32(m.newValue))
 	}
 	server.mu.Unlock()
 	server.Noticef("Reloaded: max_payload = %d", m.newValue)
@@ -462,6 +479,17 @@ func (c *clientAdvertiseOption) Apply(server *Server) {
 	server.Noticef("Reload: client_advertise = %s", c.newValue)
 }
 
+// accountsOption implements the option interface.
+// Ensure that authorization code is executed if any change in accounts
+type accountsOption struct {
+	authOption
+}
+
+// Apply is a no-op. Changes will be applied in reloadAuthorization
+func (a *accountsOption) Apply(s *Server) {
+	s.Noticef("Reloaded: accounts")
+}
+
 // Reload reads the current configuration file and applies any supported
 // changes. This returns an error if the server was not started with a config
 // file or an option which doesn't support hot-swapping was changed.
@@ -477,13 +505,20 @@ func (s *Server) Reload() error {
 		// TODO: Dump previous good config to a .bak file?
 		return err
 	}
+
+	// Wipe trusted keys if needed when we have an operator.
+	if len(s.opts.TrustedOperators) > 0 && len(s.opts.TrustedKeys) > 0 {
+		s.opts.TrustedKeys = nil
+	}
+
 	clientOrgPort := s.clientActualPort
 	clusterOrgPort := s.clusterActualPort
+	gatewayOrgPort := s.gatewayActualPort
 	s.mu.Unlock()
 
 	// Apply flags over config file settings.
 	newOpts = MergeOptions(newOpts, FlagSnapshot)
-	processOptions(newOpts)
+	setBaselineOptions(newOpts)
 
 	// processOptions sets Port to 0 if set to -1 (RANDOM port)
 	// If that's the case, set it to the saved value when the accept loop was
@@ -494,6 +529,9 @@ func (s *Server) Reload() error {
 	// We don't do that for cluster, so check against -1.
 	if newOpts.Cluster.Port == -1 {
 		newOpts.Cluster.Port = clusterOrgPort
+	}
+	if newOpts.Gateway.Port == -1 {
+		newOpts.Gateway.Port = gatewayOrgPort
 	}
 
 	if err := s.reloadOptions(newOpts); err != nil {
@@ -512,8 +550,8 @@ func (s *Server) reloadOptions(newOpts *Options) error {
 	if err != nil {
 		return err
 	}
-	// Need to save off previous cluster permissions
 	s.mu.Lock()
+	// Need to save off previous cluster permissions
 	s.oldClusterPerms = s.opts.Cluster.Permissions
 	s.mu.Unlock()
 	s.setOpts(newOpts)
@@ -530,10 +568,14 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 		newConfig = reflect.ValueOf(newOpts).Elem()
 		diffOpts  = []option{}
 	)
-
 	for i := 0; i < oldConfig.NumField(); i++ {
+		field := oldConfig.Type().Field(i)
+		// field.PkgPath is empty for exported fields, and is not for unexported ones.
+		// We skip the unexported fields.
+		if field.PkgPath != "" {
+			continue
+		}
 		var (
-			field    = oldConfig.Type().Field(i)
 			oldValue = oldConfig.Field(i).Interface()
 			newValue = newConfig.Field(i).Interface()
 			changed  = !reflect.DeepEqual(oldValue, newValue)
@@ -567,7 +609,9 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 		case "authtimeout":
 			diffOpts = append(diffOpts, &authTimeoutOption{newValue: newValue.(float64)})
 		case "users":
-			diffOpts = append(diffOpts, &usersOption{newValue: newValue.([]*User)})
+			diffOpts = append(diffOpts, &usersOption{})
+		case "nkeys":
+			diffOpts = append(diffOpts, &nkeysOption{})
 		case "cluster":
 			newClusterOpts := newValue.(ClusterOpts)
 			oldClusterOpts := oldValue.(ClusterOpts)
@@ -604,6 +648,26 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 				}
 			}
 			diffOpts = append(diffOpts, &clientAdvertiseOption{newValue: cliAdv})
+		case "accounts":
+			diffOpts = append(diffOpts, &accountsOption{})
+		case "trustedkeys":
+			diffOpts = append(diffOpts, &trustKeysOption{})
+		case "gateway":
+			// Not supported for now, but report warning if configuration of gateway
+			// is actually changed so that user knows that it won't take effect.
+
+			// Any deep-equal is likely to fail for when there is a TLSConfig. so
+			// remove for the test.
+			tmpOld := oldValue.(GatewayOpts)
+			tmpNew := newValue.(GatewayOpts)
+			tmpOld.TLSConfig = nil
+			tmpNew.TLSConfig = nil
+			// If there is really a change prevents reload.
+			if !reflect.DeepEqual(tmpOld, tmpNew) {
+				// See TODO(ik) note below about printing old/new values.
+				return nil, fmt.Errorf("Config reload not supported for %s: old=%v, new=%v",
+					field.Name, oldValue, newValue)
+			}
 		case "nolog", "nosigs":
 			// Ignore NoLog and NoSigs options since they are not parsed and only used in
 			// testing.
@@ -616,6 +680,11 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			}
 			fallthrough
 		default:
+			// TODO(ik): Implement String() on those options to have a nice print.
+			// %v is difficult to figure what's what, %+v print private fields and
+			// would print passwords. Tried json.Marshal but it is too verbose for
+			// the URL array.
+
 			// Bail out if attempting to reload any unsupported options.
 			return nil, fmt.Errorf("Config reload not supported for %s: old=%v, new=%v",
 				field.Name, oldValue, newValue)
@@ -662,16 +731,64 @@ func (s *Server) applyOptions(opts []option) {
 // unauthorized subscriptions.
 func (s *Server) reloadAuthorization() {
 	s.mu.Lock()
+
+	oldAccounts := s.accounts
+	s.accounts, s.gacc = nil, nil
+	s.configureAccounts()
+
 	s.configureAuthorization()
-	clients := make(map[uint64]*client, len(s.clients))
-	for i, client := range s.clients {
-		clients[i] = client
+
+	// This map will contain the names of accounts that have their streams
+	// import configuration changed.
+	awcsti := make(map[string]struct{}, len(s.accounts))
+
+	for _, newAcc := range s.accounts {
+		if acc, ok := oldAccounts[newAcc.Name]; ok {
+			// If account exist in latest config, "transfer" the account's
+			// sublist and client map to the new account.
+			acc.mu.RLock()
+			if len(acc.clients) > 0 {
+				newAcc.clients = make(map[*client]*client, len(acc.clients))
+				for _, c := range acc.clients {
+					newAcc.clients[c] = c
+				}
+			}
+			newAcc.sl = acc.sl
+			acc.mu.RUnlock()
+
+			// Check if current and new config of this account are same
+			// in term of stream imports.
+			if !acc.checkStreamImportsEqual(newAcc) {
+				awcsti[newAcc.Name] = struct{}{}
+			}
+		}
 	}
-	routes := make(map[uint64]*client, len(s.routes))
-	for i, route := range s.routes {
-		routes[i] = route
+	// Gather clients that changed accounts. We will close them and they
+	// will reconnect, doing the right thing.
+	var (
+		cclientsa [64]*client
+		cclients  = cclientsa[:0]
+		clientsa  [64]*client
+		clients   = clientsa[:0]
+		routesa   [64]*client
+		routes    = routesa[:0]
+	)
+	for _, client := range s.clients {
+		if s.clientHasMovedToDifferentAccount(client) {
+			cclients = append(cclients, client)
+		} else {
+			clients = append(clients, client)
+		}
+	}
+	for _, route := range s.routes {
+		routes = append(routes, route)
 	}
 	s.mu.Unlock()
+
+	// Close clients that have moved accounts
+	for _, client := range cclients {
+		client.closeConnection(ClientClosed)
+	}
 
 	for _, client := range clients {
 		// Disconnect any unauthorized clients.
@@ -679,9 +796,8 @@ func (s *Server) reloadAuthorization() {
 			client.authViolation()
 			continue
 		}
-
-		// Remove any unauthorized subscriptions.
-		client.removeUnauthorizedSubs()
+		// Remove any unauthorized subscriptions and check for account imports.
+		client.processSubsOnConfigReload(awcsti)
 	}
 
 	for _, route := range routes {
@@ -690,10 +806,46 @@ func (s *Server) reloadAuthorization() {
 		// because in the later case, we don't have the user name/password
 		// of the remote server.
 		if !route.isSolicitedRoute() && !s.isRouterAuthorized(route) {
-			route.setRouteNoReconnectOnClose()
+			route.setNoReconnect()
 			route.authViolation()
 		}
 	}
+}
+
+// Returns true if given client current account has changed (or user
+// no longer exist) in the new config, false if the user did not
+// change account.
+// Server lock is held on entry.
+func (s *Server) clientHasMovedToDifferentAccount(c *client) bool {
+	var (
+		nu *NkeyUser
+		u  *User
+	)
+	if c.opts.Nkey != "" {
+		if s.nkeys != nil {
+			nu = s.nkeys[c.opts.Nkey]
+		}
+	} else if c.opts.Username != "" {
+		if s.users != nil {
+			u = s.users[c.opts.Username]
+		}
+	} else {
+		return false
+	}
+	// Get the current account name
+	c.mu.Lock()
+	var curAccName string
+	if c.acc != nil {
+		curAccName = c.acc.Name
+	}
+	c.mu.Unlock()
+	if nu != nil && nu.Account != nil {
+		return curAccName != nu.Account.Name
+	} else if u != nil && u.Account != nil {
+		return curAccName != u.Account.Name
+	}
+	// user/nkey no longer exists.
+	return true
 }
 
 // reloadClusterPermissions reconfigures the cluster's permssions
@@ -716,7 +868,7 @@ func (s *Server) reloadClusterPermissions() {
 	for i, route := range s.routes {
 		// Count the number of routes that can understand receiving INFO updates.
 		route.mu.Lock()
-		if route.opts.Protocol >= routeProtoInfo {
+		if route.opts.Protocol >= RouteProtoInfo {
 			withNewProto++
 		}
 		route.mu.Unlock()
@@ -763,13 +915,14 @@ func (s *Server) reloadClusterPermissions() {
 		deleteRoutedSubs []*subscription
 	)
 	// FIXME(dlc) - Change for accounts.
-	s.gsl.localSubs(&localSubs)
+	s.gacc.sl.localSubs(&localSubs)
 
 	// Go through all local subscriptions
 	for _, sub := range localSubs {
 		// Get all subs that can now be imported
-		couldImportThen := oldPermsTester.canImport(sub.subject)
-		canImportNow := newPermsTester.canImport(sub.subject)
+		subj := string(sub.subject)
+		couldImportThen := oldPermsTester.canImport(subj)
+		canImportNow := newPermsTester.canImport(subj)
 		if canImportNow {
 			// If we could not before, then will need to send a SUB protocol.
 			if !couldImportThen {
@@ -785,7 +938,7 @@ func (s *Server) reloadClusterPermissions() {
 	for _, route := range routes {
 		route.mu.Lock()
 		// If route is to older server, simply close connection.
-		if route.opts.Protocol < routeProtoInfo {
+		if route.opts.Protocol < RouteProtoInfo {
 			route.mu.Unlock()
 			route.closeConnection(RouteRemoved)
 			continue
@@ -794,7 +947,8 @@ func (s *Server) reloadClusterPermissions() {
 		for _, sub := range route.subs {
 			// If we can't export, we need to drop the subscriptions that
 			// we have on behalf of this route.
-			if !route.canExport(sub.subject) {
+			subj := string(sub.subject)
+			if !route.canExport(subj) {
 				delete(route.subs, string(sub.sid))
 				deleteRoutedSubs = append(deleteRoutedSubs, sub)
 			}
@@ -804,15 +958,15 @@ func (s *Server) reloadClusterPermissions() {
 		// that we now possibly allow with a change of Export permissions.
 		route.sendInfo(infoJSON)
 		// Now send SUB and UNSUB protocols as needed.
-		closed := route.sendRouteSubProtos(subsNeedSUB, nil)
+		closed := route.sendRouteSubProtos(subsNeedSUB, false, nil)
 		if !closed {
-			route.sendRouteUnSubProtos(subsNeedUNSUB, nil)
+			route.sendRouteUnSubProtos(subsNeedUNSUB, false, nil)
 		}
 		route.mu.Unlock()
 	}
 	// Remove as a batch all the subs that we have removed from each route.
 	// FIXME(dlc) - Change for accounts.
-	s.gsl.RemoveBatch(deleteRoutedSubs)
+	s.gacc.sl.RemoveBatch(deleteRoutedSubs)
 }
 
 // validateClusterOpts ensures the new ClusterOpts does not change host or
