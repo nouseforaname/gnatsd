@@ -52,8 +52,12 @@ func TestNonTLSConnectionsWithMutualTLSServer_AllowLegacyClientsDisabled(t *test
 	clientA := createClientConn(t, "localhost", opts.Port)
 	defer clientA.Close()
 
-	_, expectA := setupConnWithAuth(t, clientA, "some_user", "some_pass")
-	expectA(regexp.MustCompile(`\x15\x03\x01\x00\x02\x02\x16`))
+	_, conn := setupConnWithAuthAndReturnConn(t, clientA, "some_user", "some_pass")
+	data := make([]byte, 32768)
+	_, err := conn.Read(data)
+	if err == nil {
+		t.Fatalf("Expected EOF error due to closed connection")
+	}
 }
 
 func TestNonTLSConnectionsWithMutualTLSServer_AllowLegacyClientsDisabled_EmptyUser(t *testing.T) {
@@ -63,8 +67,12 @@ func TestNonTLSConnectionsWithMutualTLSServer_AllowLegacyClientsDisabled_EmptyUs
 	clientA := createClientConn(t, "localhost", opts.Port)
 	defer clientA.Close()
 
-	_, expectA := setupConnWithAuth(t, clientA, "", "")
-	expectA(regexp.MustCompile(`\x15\x03\x01\x00\x02\x02\x16`))
+	_, conn := setupConnWithAuthAndReturnConn(t, clientA, "some_user", "some_pass")
+	data := make([]byte, 32768)
+	_, err := conn.Read(data)
+	if err == nil {
+		t.Fatalf("Expected EOF error due to closed connection")
+	}
 }
 
 func TestNonTLSConnectionsWithMutualTLSServer_AllowLegacyClientsEnabled(t *testing.T) {

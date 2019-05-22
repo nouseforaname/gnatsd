@@ -219,6 +219,11 @@ func setupConnWithAuth(t tLogger, c net.Conn, user, pass string) (sendFun, expec
 	return sendCommand(t, c), expectCommand(t, c)
 }
 
+func setupConnWithAuthAndReturnConn(t tLogger, c net.Conn, user, pass string) (sendFun, net.Conn) {
+	doConnectWithAuth(t, c, user, pass, true, false, false)
+	return sendCommand(t, c), c
+}
+
 func setupNonVerboseConnWithAuth(t tLogger, c net.Conn, user, pass string) (sendFun, expectFun) {
 	doConnectWithAuth(t, c, user, pass, false, false, false)
 	return sendCommand(t, c), expectCommand(t, c)
