@@ -3,7 +3,7 @@ jobs:
   - name: test
     public: true
     plan:
-      - aggregate:
+      - in_parallel:
         - get: gnatsd
           trigger: true
         - get: daily
@@ -14,7 +14,7 @@ jobs:
   - name: build
     public: true
     plan:
-      - aggregate:
+      - in_parallel:
         - get: gnatsd
           trigger: true
           passed: [ test ]
@@ -23,13 +23,13 @@ jobs:
             pre: bosh
       - put: version
         params: {file: version/version}
-      - aggregate:
+      - in_parallel:
         - task: build-linux
           file: gnatsd/ci/tasks/build-linux.yml
         - task: build-darwin
           file: gnatsd/ci/tasks/build-darwin.yml
 
-      - aggregate:
+      - in_parallel:
         - {put: release-bucket-linux, params: {file: compiled-linux/gnatsd-*-linux-amd64}}
         - {put: release-bucket-darwin, params: {file: compiled-darwin/gnatsd-*-darwin-amd64}}
 
