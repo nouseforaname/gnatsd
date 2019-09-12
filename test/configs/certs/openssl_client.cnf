@@ -1,0 +1,5 @@
+extensions=v3_req
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = keyAgreement
+extendedKeyUsage=clientAuth
