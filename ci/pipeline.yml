@@ -6,8 +6,6 @@ jobs:
       - in_parallel:
         - get: gnatsd
           trigger: true
-        - get: daily
-          trigger: true
       - task: test
         file: gnatsd/ci/tasks/test.yml
 
@@ -64,8 +62,3 @@ resources:
       access_key_id: {{bosh_gnatsd_bucket_access_key_id}}
       secret_access_key: {{bosh_gnatsd_bucket_secret_key}}
       bucket: {{bosh_gnatsd_bucket}}
-
-  - name: daily
-    type: time
-    source:
-      interval: 24h
