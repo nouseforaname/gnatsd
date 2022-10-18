@@ -835,11 +835,12 @@ func TestTLSCloseClientConnection(t *testing.T) {
 		cli.nc.SetWriteDeadline(time.Time{})
 	}
 	ch := make(chan bool)
+	fmt.Println("!!!! Before Routine !!!!")
 	go func() {
 		select {
 		case <-ch:
 			return
-		case <-time.After(3 * time.Second):
+		case <-time.After(6 * time.Second):
 			fmt.Println("!!!! closeConnection is blocked, test will hang !!!")
 			return
 		}
