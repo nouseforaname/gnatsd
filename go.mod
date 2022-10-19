@@ -14,5 +14,5 @@ require (
 
 require (
 	github.com/nats-io/nkeys v0.3.0 // indirect
-	google.golang.org/protobuf v1.26.0 // indirect
+	google.golang.org/protobuf v1.26.0-rc.1 // indirect
 )
