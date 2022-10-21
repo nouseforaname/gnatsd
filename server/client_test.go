@@ -32,6 +32,7 @@ import (
 
 	"crypto/x509"
 	"encoding/pem"
+
 	"github.com/nats-io/go-nats"
 )
 
@@ -839,7 +840,7 @@ func TestTLSCloseClientConnection(t *testing.T) {
 		select {
 		case <-ch:
 			return
-		case <-time.After(3 * time.Second):
+		case <-time.After(6 * time.Second):
 			fmt.Println("!!!! closeConnection is blocked, test will hang !!!")
 			return
 		}
